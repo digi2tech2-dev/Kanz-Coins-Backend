@@ -46,15 +46,15 @@ describe('Dealer dynamic provider product selection', () => {
         expect(result.products[0]).toMatchObject({
             externalProductId: 'ibulala_dynamic_coins',
             rawName: 'Ibulala Dynamic Coins (Any Amount)',
-            rawPrice: '0.00000001',
-            price: '0.00000001',
+            rawPrice: '0.00000000001',
+            price: '0.00000000001',
             minQty: 1,
             maxQty: 500000000,
             isActive: true,
             rawPayload: expect.objectContaining({
                 product_id: 'ibulala_dynamic_coins',
                 product_name: 'Ibulala Dynamic Coins (Any Amount)',
-                product_price: '0.00000001',
+                product_price: '0.00000000001',
                 currency: 'USD',
             }),
         });
@@ -115,12 +115,12 @@ describe('Dealer dynamic provider product selection', () => {
         expect(persisted).toMatchObject({
             externalProductId: 'ibulala_dynamic_coins',
             rawName: 'Ibulala Dynamic Coins (Any Amount)',
-            rawPrice: '0.00000001',
+            rawPrice: '0.00000000001',
             minQty: 1,
             maxQty: 500000000,
             rawPayload: expect.objectContaining({
-                price: '0.00000001',
-                product_price: '0.00000001',
+                price: '0.00000000001',
+                product_price: '0.00000000001',
             }),
         });
         expect(persisted.rawPrice).not.toBe('18');

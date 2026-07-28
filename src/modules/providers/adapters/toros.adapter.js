@@ -41,6 +41,36 @@ const { extractTargetId } = require('./providerParams.helper');
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 
+const _normaliseTorosStatus = (status) => {
+    switch (String(status ?? '').toLowerCase().trim()) {
+        case 'completed':
+        case 'complete':
+        case 'success':
+        case 'done':
+        case 'ok':
+        case 'delivered':
+            return 'Completed';
+        case 'pending':
+        case 'processing':
+        case 'queued':
+        case 'wait':
+        case 'waiting':
+        case 'in_process':
+            return 'Pending';
+        case 'cancelled':
+        case 'canceled':
+        case 'cancel':
+        case 'failed':
+        case 'fail':
+        case 'error':
+        case 'reject':
+        case 'rejected':
+            return 'Cancelled';
+        default:
+            return 'Pending';
+    }
+};
+
 // ─── HTTP client factory ──────────────────────────────────────────────────────
 
 const _buildClient = (baseURL, token, timeoutMs = DEFAULT_TIMEOUT_MS) => {
@@ -115,8 +145,8 @@ class TorosfonAdapter extends BaseProviderAdapter {
             externalProductId: String(item.id ?? item.product_id ?? item.service ?? item.code),
             rawName: String(item.product_name ?? item.name ?? item.product_name_translated ?? item.title ?? item.service_name ?? 'Unknown'),
             rawPrice: String(item.product_price ?? item.rate ?? item.price ?? item.cost ?? 0),
-            minQty: parseInt(item.min ?? item.min_qty ?? item.min_quantity ?? 1, 10),
-            maxQty: parseInt(item.max ?? item.max_qty ?? item.max_quantity ?? 9999, 10),
+            minQty: parseInt(item.min ?? item.min_qty ?? item.min_quantity ?? item.min_order ?? 1, 10),
+            maxQty: parseInt(item.max ?? item.max_qty ?? item.max_quantity ?? item.max_order ?? 9999, 10),
             isActive: item.active !== false && item.is_active !== false && item.status !== 'inactive' && item.status !== 'Inactive',
             rawPayload: item,
         }));
@@ -219,7 +249,7 @@ class TorosfonAdapter extends BaseProviderAdapter {
             return {
                 success: true,
                 providerOrderId: parseInt(String(providerOrderId), 10),
-                providerStatus,
+                providerStatus: _normaliseTorosStatus(providerStatus),
                 rawResponse: data,
                 errorMessage: null,
             };
@@ -270,7 +300,7 @@ class TorosfonAdapter extends BaseProviderAdapter {
 
         return {
             providerOrderId: parseInt(String(resolvedOrderId), 10),
-            providerStatus,
+            providerStatus: _normaliseTorosStatus(providerStatus),
             unifiedStatus: this.toUnifiedStatus(providerStatus),
             rawResponse: data,
         };
@@ -298,9 +328,14 @@ class TorosfonAdapter extends BaseProviderAdapter {
         });
 
         // Normalise object-map → array
-        return Object.entries(data).map(([id, item]) => ({
+        const payload = data.orders ?? data.data ?? data;
+        const list = Array.isArray(payload)
+            ? payload.map((item) => [item.id ?? item.order_id, item])
+            : Object.entries(payload);
+
+        return list.map(([id, item]) => ({
             providerOrderId: parseInt(id, 10),
-            providerStatus: item.status ?? 'Pending',
+            providerStatus: _normaliseTorosStatus(item.status ?? item.order_status ?? 'Pending'),
             rawResponse: item,
         }));
     }

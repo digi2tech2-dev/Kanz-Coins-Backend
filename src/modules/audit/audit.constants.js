@@ -119,6 +119,21 @@ const TARGET_ORDER_ACTIONS = Object.freeze({
     REJECTED: 'TARGET_ORDER_REJECTED',
 });
 
+/** Sub-agent / reseller approval workflow actions. */
+const SUB_AGENT_REQUEST_ACTIONS = Object.freeze({
+    CREATED: 'SUB_AGENT_REQUEST_CREATED',
+    APPROVED: 'SUB_AGENT_REQUEST_APPROVED',
+    REJECTED: 'SUB_AGENT_REQUEST_REJECTED',
+});
+
+/** Referral payout workflow actions. */
+const REFERRAL_PAYOUT_ACTIONS = Object.freeze({
+    CREATED: 'REFERRAL_PAYOUT_CREATED',
+    REJECTED: 'REFERRAL_PAYOUT_REJECTED',
+    WALLET_PAID: 'REFERRAL_PAYOUT_WALLET_PAID',
+    MANUAL_PAID: 'REFERRAL_PAYOUT_MANUAL_PAID',
+});
+
 /**
  * Flat set of ALL valid action strings — used by the model enum validator
  * and the service-layer guard.
@@ -135,6 +150,8 @@ const ALL_ACTIONS = Object.freeze([
     ...Object.values(PRODUCT_ACTIONS),
     ...Object.values(CATEGORY_ACTIONS),
     ...Object.values(TARGET_ORDER_ACTIONS),
+    ...Object.values(SUB_AGENT_REQUEST_ACTIONS),
+    ...Object.values(REFERRAL_PAYOUT_ACTIONS),
 ]);
 
 /** Entity types that can be the subject of an audit event. */
@@ -150,6 +167,8 @@ const ENTITY_TYPES = Object.freeze({
     SETTING: 'SETTING',
     SYSTEM: 'SYSTEM',
     TARGET_ORDER: 'TARGET_ORDER',
+    SUB_AGENT_REQUEST: 'SUB_AGENT_REQUEST',
+    REFERRAL_PAYOUT: 'REFERRAL_PAYOUT',
 });
 
 /** Actor roles recorded in each audit log. */
@@ -173,6 +192,8 @@ module.exports = {
     PRODUCT_ACTIONS,
     CATEGORY_ACTIONS,
     TARGET_ORDER_ACTIONS,
+    SUB_AGENT_REQUEST_ACTIONS,
+    REFERRAL_PAYOUT_ACTIONS,
     ALL_ACTIONS,
     ENTITY_TYPES,
     ACTOR_ROLES,

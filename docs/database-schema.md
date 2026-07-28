@@ -7,6 +7,7 @@ All collections use **Mongoose ODM** over MongoDB. Unless noted, all schemas inc
 ## Table of Contents
 
 - [User](#user)
+- [OAuthStateNonce](#oauthstatenonce)
 - [Group](#group)
 - [Product](#product)
 - [ProviderProduct](#providerproduct)
@@ -14,6 +15,7 @@ All collections use **Mongoose ODM** over MongoDB. Unless noted, all schemas inc
 - [Order](#order)
 - [WalletTransaction](#wallettransaction)
 - [DepositRequest](#depositrequest)
+- [SubAgentRequest](#subagentrequest)
 - [Currency](#currency)
 - [AuditLog](#auditlog)
 - [Setting](#setting)
@@ -30,6 +32,9 @@ All collections use **Mongoose ODM** over MongoDB. Unless noted, all schemas inc
 |-------|------|----------|-------|
 | `name` | String | ✅ | 2–100 chars |
 | `email` | String | ✅ | Unique, lowercase, sparse index |
+| `referralCode` | String | ❌ | Immutable public invitation code. Unique sparse index |
+| `referredBy` | ObjectId → User | ❌ | Immutable inviter relationship |
+| `referredAt` | Date | ❌ | Immutable referral assignment timestamp |
 | `password` | String | ❌ | Bcrypt hashed. Omitted for OAuth users. Never returned by default (`select: false`) |
 | `googleId` | String | ❌ | Google OAuth sub. Sparse unique index |
 | `verified` | Boolean | — | Default `false`. Google users auto-verified |
@@ -42,25 +47,51 @@ All collections use **Mongoose ODM** over MongoDB. Unless noted, all schemas inc
 | `rejectedBy` | ObjectId → User | ❌ | Admin who rejected |
 | `rejectedAt` | Date | ❌ | Timestamp of rejection |
 | `groupId` | ObjectId → Group | ✅ | Pricing tier. Auto-assigned on registration |
-| `walletBalance` | Number | — | Non-negative. Default `0` |
-| `creditLimit` | Number | — | Schema field retained for compatibility. Not used in business logic |
-| `creditUsed` | Number | — | Schema field retained for compatibility. Always `0` |
+| `resellerStatus` | String | — | Durable reseller state: `NONE` or `APPROVED` |
+| `resellerApprovedAt` | Date | ❌ | Server timestamp set during Sub-Agent approval |
+| `referralCommissionStoppedAt` | Date | ❌ | Same timestamp as reseller approval; stops future commissions from this user's deposits |
+| `walletBalance` | Number | — | Ledger balance. May be negative when credit is used. Default `0` |
+| `creditLimit` | Number | — | Maximum permitted overdraft. Default `0` |
+| `creditUsed` | Number | — | Derived reporting mirror of used credit. Default `0` |
 | `currency` | String | — | ISO 4217, 3 letters. Default `USD` |
+| `country` | String | ❌ | 2-letter country code used by signup/profile completion |
 | `deletedAt` | Date | ❌ | Soft-delete timestamp. Null = not deleted |
 
 **Virtuals:**
 - `isActive` → `status === 'ACTIVE'` (backward-compat shim)
-- `availableBalance` → `walletBalance` rounded to 2 dp
-- `availableCredit` → `creditLimit - creditUsed` (always 0)
+- `availableBalance` -> `max(0, walletBalance + creditLimit)` rounded to 2 dp
+- `availableCredit` -> `max(0, creditLimit - creditUsed)` rounded to 2 dp
 
 **Indexes:**
 ```
 email       unique
+referralCode unique sparse
+referredBy  1
 googleId    unique sparse
 status      1
 role        1
 groupId     1
+resellerStatus 1
 deletedAt   1 sparse
+```
+
+---
+
+## OAuthStateNonce
+
+**Collection:** `oauthstatenonces`
+
+Stores consumed Google OAuth state nonces so callback replay is rejected across all application workers that share MongoDB.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `nonce` | String | yes | Unique state nonce from the signed OAuth payload |
+| `expiresAt` | Date | yes | TTL expiry matching the OAuth state expiration |
+
+**Indexes:**
+```
+nonce      unique
+expiresAt  TTL expireAfterSeconds=0
 ```
 
 ---
@@ -328,6 +359,37 @@ userId + createdAt -1   (customer history)
 
 ---
 
+## SubAgentRequest
+
+**Collection:** `subagentrequests`
+
+Customer-submitted request history for becoming an approved reseller/sub-agent.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `userId` | ObjectId -> User | yes | Request owner |
+| `status` | String | yes | `PENDING`, `APPROVED`, `REJECTED`; default `PENDING` |
+| `notes` | String | yes | Customer message, max 1000 chars |
+| `proofPath` | String | yes | Relative upload path only |
+| `proofFileName` | String | yes | Generated filename |
+| `proofMimeType` | String | yes | JPEG, PNG, or WebP |
+| `proofSize` | Number | yes | Uploaded file size |
+| `requestedGroupId` | ObjectId -> Group | no | Reserved snapshot, currently null |
+| `approvedGroupId` | ObjectId -> Group | no | Group selected during approval |
+| `reviewedBy` | ObjectId -> User | no | Admin/supervisor reviewer |
+| `reviewedAt` | Date | no | Server review timestamp |
+| `rejectionReason` | String | no | Customer-visible rejection reason, max 500 chars |
+
+**Indexes:**
+```
+userId
+userId + status unique partial where status = PENDING
+status + createdAt -1
+reviewedAt -1
+```
+
+---
+
 ## Currency
 
 **Collection:** `currencies`
@@ -402,6 +464,8 @@ Key-value store for runtime platform configuration. Seeded with defaults on star
 | `wallettransactions` | `userId + createdAt` | compound |
 | `depositrequests` | `status + createdAt` | compound |
 | `depositrequests` | `userId + createdAt` | compound |
+| `subagentrequests` | `userId + status` where `status = PENDING` | partial unique |
+| `subagentrequests` | `status + createdAt`, `reviewedAt` | compound/single |
 
 ---
 
@@ -413,6 +477,7 @@ Group ←────────── User ←────────── O
                     │                └──── WalletTransaction  │
                     │                                         │
                     └──────────── DepositRequest         ProviderProduct
+                    └──────────── SubAgentRequest
                                                                │
                                                            Provider
 ```
@@ -420,6 +485,7 @@ Group ←────────── User ←────────── O
 - Every `User` belongs to one `Group`
 - Every `Order` references one `User` and one `Product` (snapshot-frozen at creation)
 - Every `Order` may reference one `WalletTransaction` (debit), and another on refund
+- Every `SubAgentRequest` references one `User`; approval snapshots an existing `Group`
 - Every `Product` may link to one `ProviderProduct`
 - Every `ProviderProduct` belongs to one `Provider`
 - `AuditLog` references any entity by `entityId + entityType` (polymorphic, no FK)

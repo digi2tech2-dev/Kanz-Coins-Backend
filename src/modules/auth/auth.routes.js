@@ -33,6 +33,10 @@ const authenticate = require('../../shared/middlewares/authenticate');
 const { body } = require('express-validator');
 const config = require('../../config/config');
 const { authLimiter } = require('../../shared/middlewares/rateLimiter');
+const {
+    createGoogleOAuthState,
+    consumeGoogleOAuthState,
+} = require('./oauthState.service');
 
 const router = Router();
 
@@ -46,6 +50,37 @@ const requireGoogleConfig = (req, res, next) => {
         });
     }
     next();
+};
+
+const startGoogleOAuth = (req, res, next) => {
+    const state = createGoogleOAuthState({
+        referralCode: req.query.referralCode || req.query.ref || req.query.refCode || req.query.inviteCode,
+        intent: req.query.intent || req.query.mode,
+    });
+
+    return passport.authenticate('google', {
+        scope: ['profile', 'email'],
+        session: false,
+        state,
+    })(req, res, next);
+};
+
+const verifyGoogleOAuthState = async (req, res, next) => {
+    try {
+        req.oauthState = await consumeGoogleOAuthState(req.query.state);
+        return next();
+    } catch (err) {
+        return next(err);
+    }
+};
+
+const finishGoogleOAuth = (req, res, next) => {
+    return passport.authenticate('google', { session: false }, (err, user) => {
+        if (err) return next(err);
+        if (!user) return res.redirect('/api/auth/google/failure');
+        req.user = user;
+        return next();
+    })(req, res, next);
 };
 
 // ─── Email / Password ─────────────────────────────────────────────────────────
@@ -101,10 +136,7 @@ router.post(
 router.get(
     '/google',
     requireGoogleConfig,
-    passport.authenticate('google', {
-        scope: ['profile', 'email'],
-        session: false,
-    })
+    startGoogleOAuth
 );
 
 /**
@@ -115,10 +147,8 @@ router.get(
 router.get(
     '/google/callback',
     requireGoogleConfig,
-    passport.authenticate('google', {
-        session: false,
-        failureRedirect: '/api/auth/google/failure',
-    }),
+    verifyGoogleOAuthState,
+    finishGoogleOAuth,
     authController.googleCallback
 );
 

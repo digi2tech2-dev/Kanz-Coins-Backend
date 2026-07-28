@@ -15,6 +15,7 @@ const { recalculateCreditUsed } = require('../wallet/wallet.service');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const { buildPublicWalletSummary } = require('../../shared/utils/walletSummary');
 
 const MAX_ADJUSTMENT = 100_000;  // guard against fat-finger typos
 
@@ -43,7 +44,13 @@ const listWallets = async ({ page = 1, limit = 20 } = {}) => {
         User.countDocuments({ deletedAt: null }),
     ]);
 
-    return { wallets: users, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+    return {
+        wallets: users.map((user) => ({
+            ...(user.toSafeObject ? user.toSafeObject() : user.toObject()),
+            ...buildPublicWalletSummary(user),
+        })),
+        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
 };
 
 // ─── Get one user's wallet ─────────────────────────────────────────────────────
@@ -60,7 +67,13 @@ const getWallet = async (userId) => {
         .limit(20)
         .populate('reference', 'orderNumber customerInput status totalPrice');
 
-    return { user, recentTransactions };
+    return {
+        user: {
+            ...(user.toSafeObject ? user.toSafeObject() : user.toObject()),
+            ...buildPublicWalletSummary(user),
+        },
+        recentTransactions,
+    };
 };
 
 // ─── Transaction history ───────────────────────────────────────────────────────
@@ -324,7 +337,14 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
         },
     });
 
-    return { transaction, user: { walletBalance: newBalance, creditUsed: creditUsedAfter } };
+    return {
+        transaction,
+        user: buildPublicWalletSummary({
+            walletBalance: newBalance,
+            creditLimit: user.creditLimit,
+            currency: user.currency,
+        }),
+    };
 };
 
 // ─── Bulk Debt Adjustment (Currency Devaluation) ─────────────────────────────

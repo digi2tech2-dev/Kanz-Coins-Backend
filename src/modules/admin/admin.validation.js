@@ -123,6 +123,79 @@ const updateCreditLimitSchema = Joi.object({
     }),
 });
 
+const updateReferralCommissionOverrideSchema = Joi.object({
+    percent: Joi.number().min(0).max(50).allow(null).required().messages({
+        'number.min': 'Referral commission percent cannot be negative',
+        'number.max': 'Referral commission percent cannot exceed 50',
+        'any.required': 'percent is required',
+    }),
+});
+
+const listReferralAgentsQuerySchema = Joi.object({
+    ...pagination,
+    search: Joi.string().trim().max(128).allow('', null),
+});
+
+const listSubAgentRequestsQuerySchema = Joi.object({
+    ...pagination,
+    status: Joi.string().trim().uppercase().valid('PENDING', 'APPROVED', 'REJECTED'),
+    search: Joi.string().trim().max(128).allow('', null),
+    from: Joi.date().iso(),
+    to: Joi.date().iso().min(Joi.ref('from')),
+});
+
+const approveSubAgentRequestSchema = Joi.object({
+    groupId: objectId().required().messages({
+        'any.required': 'groupId is required',
+    }),
+});
+
+const rejectSubAgentRequestSchema = Joi.object({
+    reason: Joi.string().trim().min(1).max(500),
+    rejectionReason: Joi.string().trim().min(1).max(500),
+    adminNotes: Joi.string().trim().min(1).max(500),
+}).or('reason', 'rejectionReason', 'adminNotes').messages({
+    'object.missing': 'A rejection reason is required',
+});
+
+const listReferralPayoutsQuerySchema = Joi.object({
+    ...pagination,
+    status: Joi.string().trim().uppercase().valid('PENDING', 'PAID', 'REJECTED'),
+    method: Joi.string().trim().valid(
+        'wallet',
+        'wallet_credit',
+        'WALLET_CREDIT',
+        'manual_external',
+        'MANUAL_EXTERNAL',
+        'vodafone',
+        'vodafone_cash',
+        'instapay',
+        'bank',
+        'bank_transfer',
+        'usdt',
+        'other'
+    ),
+    currency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/),
+    search: Joi.string().trim().max(128).allow('', null),
+    from: Joi.date().iso(),
+    to: Joi.date().iso().min(Joi.ref('from')),
+});
+
+const rejectReferralPayoutSchema = Joi.object({
+    reason: Joi.string().trim().min(1).max(500),
+    rejectionReason: Joi.string().trim().min(1).max(500),
+    adminNotes: Joi.string().trim().min(1).max(500),
+}).or('reason', 'rejectionReason', 'adminNotes').messages({
+    'object.missing': 'A rejection reason is required',
+});
+
+const markReferralPayoutPaidSchema = Joi.object({
+    externalTransactionReference: Joi.string().trim().max(160).allow('', null),
+    reference: Joi.string().trim().max(160).allow('', null),
+    transactionReference: Joi.string().trim().max(160).allow('', null),
+    transactionId: Joi.string().trim().max(160).allow('', null),
+});
+
 const resetUserPasswordSchema = Joi.object({
     password: Joi.string().min(8).max(128).required().messages({
         'any.required': 'New password is required',
@@ -411,6 +484,14 @@ module.exports = {
         updateUserRole: updateUserRoleSchema,
         updateUserCurrency: updateUserCurrencySchema,
         updateCreditLimit: updateCreditLimitSchema,
+        updateReferralCommissionOverride: updateReferralCommissionOverrideSchema,
+        listReferralAgentsQuery: listReferralAgentsQuerySchema,
+        listSubAgentRequestsQuery: listSubAgentRequestsQuerySchema,
+        approveSubAgentRequest: approveSubAgentRequestSchema,
+        rejectSubAgentRequest: rejectSubAgentRequestSchema,
+        listReferralPayoutsQuery: listReferralPayoutsQuerySchema,
+        rejectReferralPayout: rejectReferralPayoutSchema,
+        markReferralPayoutPaid: markReferralPayoutPaidSchema,
         resetUserPassword: resetUserPasswordSchema,
         updateUserAvatar: updateUserAvatarSchema,
         updateUserPermissions: updateUserPermissionsSchema,

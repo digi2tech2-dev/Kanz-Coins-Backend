@@ -85,11 +85,13 @@ const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
 const { walletLimiter } = require('../../shared/middlewares/rateLimiter');
+const { BusinessRuleError } = require('../../shared/errors/AppError');
 
 const { validateBody, validateQuery, schemas } = require('./admin.validation');
 
 const avatarUpload = createUpload('avatars');
 const targetAppUpload = createUpload('target-apps');
+const referralPayoutReceiptUpload = createUpload('referral-payout-receipts');
 
 // ── Controllers ───────────────────────────────────────────────────────────────
 const usersCtrl = require('./admin.users.controller');
@@ -106,6 +108,11 @@ const groupSvc = require('../groups/group.service');
 const { Currency } = require('../currency/currency.model');
 const { getEntityAuditLogs, getActorAuditLogs } = require('../audit/audit.service');
 const depositSvc = require('../deposits/deposit.service');
+const referralCommissionSvc = require('../referrals/referralCommission.service');
+const referralDashboardSvc = require('../referrals/referralDashboard.service');
+const referralPayoutCtrl = require('../referralPayouts/referralPayout.controller');
+const referralPayoutSvc = require('../referralPayouts/referralPayout.service');
+const subAgentRequestCtrl = require('../subAgentRequests/subAgentRequest.controller');
 const targetSvc = require('../targets/target.service');
 const targetValidation = require('../targets/target.validation');
 const notifSvc = require('../notifications/notification.service');
@@ -123,6 +130,38 @@ const attachTargetAppImage = (req, _res, next) => {
         req.body.image = `uploads/target-apps/${req.file.filename}`;
     }
     next();
+};
+
+const uploadReferralPayoutReceipt = (req, res, next) => {
+    referralPayoutReceiptUpload.fields([
+        { name: 'receiptImage', maxCount: 1 },
+        { name: 'receipt', maxCount: 1 },
+        { name: 'paymentProof', maxCount: 1 },
+    ])(req, res, (err) => {
+        if (!err) return next();
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return next(new BusinessRuleError('Referral payout receipt file is too large.', 'PAYOUT_RECEIPT_INVALID'));
+        }
+        if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+            return next(new BusinessRuleError('Unexpected referral payout receipt field.', 'PAYOUT_RECEIPT_INVALID'));
+        }
+        return next(err);
+    });
+};
+
+const pickReferralPayoutReceiptFile = (req) => {
+    const files = req.files || {};
+    return files.receiptImage?.[0] || files.receipt?.[0] || files.paymentProof?.[0] || null;
+};
+
+const validateReferralPayoutPaidBody = (req, res, next) => {
+    validateBody(schemas.markReferralPayoutPaid)(req, res, async (err) => {
+        if (err) {
+            await referralPayoutSvc.cleanupReceiptFile(pickReferralPayoutReceiptFile(req));
+            return next(err);
+        }
+        return next();
+    });
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -153,6 +192,75 @@ router.patch('/users/:id/credit-limit', requirePermission('MANAGE_USERS'), valid
 router.post('/users/:id/reset-password', requirePermission('MANAGE_USERS'), validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);
 router.patch('/users/:id/avatar', requirePermission('MANAGE_USERS'), avatarUpload.single('avatar'), usersCtrl.updateUserAvatar);
 router.patch('/users/:id/permissions', adminOnly, validateBody(schemas.updateUserPermissions), usersCtrl.updateUserPermissions);
+router.get('/referrals/agents', adminOnly, validateQuery(schemas.listReferralAgentsQuery), catchAsync(async (req, res) => {
+    const result = await referralDashboardSvc.listAdminReferralAgents(req.query);
+    return res.status(200).json({
+        success: true,
+        message: 'Referral agents retrieved.',
+        data: result.agents,
+        pagination: result.pagination,
+        defaultCommissionPercent: result.defaultCommissionPercent,
+        settingKey: result.settingKey,
+    });
+}));
+router.patch('/referrals/agents/:userId/commission', adminOnly, validateBody(schemas.updateReferralCommissionOverride), catchAsync(async (req, res) => {
+    const result = await referralCommissionSvc.setReferralCommissionOverride({
+        userId: req.params.userId,
+        percent: req.body.percent,
+        adminId: req.user._id,
+        auditContext: { actorId: req.user._id, actorRole: 'ADMIN', ipAddress: req.ip, userAgent: req.get('User-Agent') },
+    });
+    sendSuccess(res, result, 'Referral commission override updated.');
+}));
+
+router.get(
+    '/sub-agent-requests',
+    requirePermission('MANAGE_USERS'),
+    validateQuery(schemas.listSubAgentRequestsQuery),
+    subAgentRequestCtrl.listAdminRequests
+);
+router.patch(
+    '/sub-agent-requests/:id/approve',
+    requirePermission('MANAGE_USERS'),
+    validateBody(schemas.approveSubAgentRequest),
+    subAgentRequestCtrl.approveRequest
+);
+router.patch(
+    '/sub-agent-requests/:id/reject',
+    requirePermission('MANAGE_USERS'),
+    validateBody(schemas.rejectSubAgentRequest),
+    subAgentRequestCtrl.rejectRequest
+);
+
+router.get(
+    '/referral-payouts',
+    requirePermission('MANAGE_WALLET'),
+    validateQuery(schemas.listReferralPayoutsQuery),
+    referralPayoutCtrl.listAdminPayouts
+);
+router.get(
+    '/referral-payouts/:id',
+    requirePermission('MANAGE_WALLET'),
+    referralPayoutCtrl.getAdminPayout
+);
+router.patch(
+    '/referral-payouts/:id/reject',
+    requirePermission('MANAGE_WALLET'),
+    validateBody(schemas.rejectReferralPayout),
+    referralPayoutCtrl.rejectPayout
+);
+router.patch(
+    '/referral-payouts/:id/pay-wallet',
+    requirePermission('MANAGE_WALLET'),
+    referralPayoutCtrl.payWalletPayout
+);
+router.patch(
+    '/referral-payouts/:id/mark-paid',
+    requirePermission('MANAGE_WALLET'),
+    uploadReferralPayoutReceipt,
+    validateReferralPayoutPaidBody,
+    referralPayoutCtrl.markManualPayoutPaid
+);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROVIDERS
@@ -495,7 +603,7 @@ router.patch('/targets/:id/reject', requirePermission('CONFIRM_TARGET_REQUESTS')
     const order = await targetSvc.rejectTargetOrder(
         req.params.id,
         req.user._id,
-        req.body.adminNotes ?? null,
+        req.body.adminNotes,
         auditContext
     );
     sendSuccess(res, order, 'Target order rejected.');

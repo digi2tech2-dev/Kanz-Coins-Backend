@@ -47,6 +47,12 @@ const paymentMethod = Joi.string().trim().min(1).max(64).messages({
 });
 
 const paymentMethodsArray = Joi.array().items(paymentMethod.required()).min(1).unique();
+const optionalSnapshotString = Joi.string().trim().max(128).allow('', null);
+const idempotencyKey = Joi.string().trim().min(8).max(128).pattern(/^[A-Za-z0-9._:-]+$/).allow('', null).messages({
+    'string.min': 'idempotencyKey must be at least 8 characters',
+    'string.max': 'idempotencyKey cannot exceed 128 characters',
+    'string.pattern.base': 'idempotencyKey contains unsupported characters',
+});
 
 const paymentMethodsField = Joi.alternatives().try(
     paymentMethodsArray,
@@ -95,6 +101,10 @@ const createTargetOrderSchema = Joi.object({
     paymentMethod: paymentMethod.required().messages({
         'any.required': 'paymentMethod is required',
     }),
+    paymentMethodId: paymentMethod.optional(),
+    paymentReference: Joi.string().trim().max(128).allow('', null),
+    targetAccountIdSnapshot: optionalSnapshotString,
+    idempotencyKey,
 });
 
 const createTargetAppSchema = Joi.object({
@@ -107,6 +117,8 @@ const createTargetAppSchema = Joi.object({
         'number.positive': 'unitPrice must be greater than 0',
         'any.required': 'unitPrice is required',
     }),
+    targetAccountId: optionalSnapshotString,
+    receivingAccountId: optionalSnapshotString,
     image: Joi.string().trim().max(2048).allow('', null),
     allowedPaymentMethods: paymentMethodsField.required().messages({
         'any.required': 'allowedPaymentMethods is required',
@@ -117,6 +129,8 @@ const createTargetAppSchema = Joi.object({
 const updateTargetAppSchema = Joi.object({
     name: Joi.string().trim().min(1).max(120),
     unitPrice: Joi.number().positive(),
+    targetAccountId: optionalSnapshotString,
+    receivingAccountId: optionalSnapshotString,
     image: Joi.string().trim().max(2048).allow('', null),
     allowedPaymentMethods: paymentMethodsField,
     isActive: Joi.boolean(),
@@ -135,10 +149,22 @@ const listTargetOrdersQuery = Joi.object({
     search: Joi.string().allow('', null).optional(),
 });
 
+const rejectionText = Joi.string().trim().min(1).max(500).messages({
+    'string.empty': 'Rejection reason is required',
+    'string.min': 'Rejection reason is required',
+    'string.max': 'adminNotes cannot exceed 500 characters',
+});
+
 const rejectTargetOrderSchema = Joi.object({
-    adminNotes: Joi.string().trim().max(500).optional().allow('', null).messages({
-        'string.max': 'adminNotes cannot exceed 500 characters',
-    }),
+    adminNotes: rejectionText.optional(),
+    rejectionReason: rejectionText.optional(),
+    reason: rejectionText.optional(),
+}).custom((value, helpers) => {
+    const adminNotes = value.adminNotes ?? value.rejectionReason ?? value.reason;
+    if (!adminNotes) return helpers.error('any.custom');
+    return { adminNotes };
+}, 'rejection reason normalizer').messages({
+    'any.custom': 'Rejection reason is required',
 });
 
 module.exports = {

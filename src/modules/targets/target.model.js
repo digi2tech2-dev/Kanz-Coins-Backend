@@ -27,6 +27,12 @@ const targetAppSchema = new mongoose.Schema(
             maxlength: [2048, 'image path cannot exceed 2048 characters'],
             default: null,
         },
+        targetAccountId: {
+            type: String,
+            trim: true,
+            maxlength: [128, 'targetAccountId cannot exceed 128 characters'],
+            default: '',
+        },
         allowedPaymentMethods: {
             type: [String],
             required: [true, 'allowedPaymentMethods is required'],
@@ -89,6 +95,30 @@ const targetOrderSchema = new mongoose.Schema(
             trim: true,
             maxlength: [64, 'paymentMethod cannot exceed 64 characters'],
         },
+        paymentMethodIdSnapshot: {
+            type: String,
+            trim: true,
+            maxlength: [64, 'paymentMethodIdSnapshot cannot exceed 64 characters'],
+            default: null,
+        },
+        paymentMethodNameSnapshot: {
+            type: String,
+            trim: true,
+            maxlength: [120, 'paymentMethodNameSnapshot cannot exceed 120 characters'],
+            default: null,
+        },
+        paymentMethodTypeSnapshot: {
+            type: String,
+            trim: true,
+            maxlength: [64, 'paymentMethodTypeSnapshot cannot exceed 64 characters'],
+            default: null,
+        },
+        targetAccountIdSnapshot: {
+            type: String,
+            trim: true,
+            maxlength: [128, 'targetAccountIdSnapshot cannot exceed 128 characters'],
+            default: null,
+        },
         transferNumber: {
             type: String,
             required: [true, 'transferNumber is required'],
@@ -141,6 +171,18 @@ const targetOrderSchema = new mongoose.Schema(
             type: Date,
             default: null,
         },
+        idempotencyKey: {
+            type: String,
+            trim: true,
+            maxlength: [128, 'idempotencyKey cannot exceed 128 characters'],
+            default: undefined,
+        },
+        idempotencyFingerprint: {
+            type: String,
+            trim: true,
+            maxlength: [128, 'idempotencyFingerprint cannot exceed 128 characters'],
+            default: undefined,
+        },
     },
     {
         timestamps: true,
@@ -151,6 +193,14 @@ const targetOrderSchema = new mongoose.Schema(
 targetOrderSchema.index({ status: 1, createdAt: 1 });
 targetOrderSchema.index({ userId: 1, createdAt: -1 });
 targetOrderSchema.index({ appId: 1, createdAt: -1 });
+targetOrderSchema.index(
+    { userId: 1, idempotencyKey: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { idempotencyKey: { $type: 'string' } },
+        name: 'unique_target_user_idempotency_key',
+    }
+);
 
 targetOrderSchema.virtual('isApproved').get(function () {
     return this.status === TARGET_ORDER_STATUS.APPROVED;

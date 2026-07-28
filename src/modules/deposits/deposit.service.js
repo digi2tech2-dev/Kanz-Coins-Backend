@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const { DepositRequest, DEPOSIT_STATUS } = require('./deposit.model');
 const { User } = require('../users/user.model');
 const { creditWalletDirect } = require('../wallet/wallet.service');
+const { processDepositReferralCommission } = require('../referrals/referralCommission.service');
 // convertUsdToUserCurrency removed — deposits now credit requestedAmount directly
 const {
     NotFoundError,
@@ -14,6 +15,14 @@ const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { notifyNewDeposit, notifyDepositApproved, notifyDepositRejected } = require('../notifications/notification.service');
 const whatsappService = require('../whatsapp/whatsapp.service');
+
+const runTestHook = async (hook, payload) => {
+    if (!hook) return;
+    if (process.env.NODE_ENV !== 'test') {
+        throw new Error('Deposit approval test hooks are only available in NODE_ENV=test.');
+    }
+    await hook(payload);
+};
 
 const safeParseJson = (value) => {
     if (typeof value !== 'string') return null;
@@ -186,9 +195,21 @@ const createDepositRequest = async ({
  *
  * @returns {Promise<DepositRequest>}
  */
-const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditContext = null) => {
+const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditContext = null, testHooks = {}) => {
+    const session = await mongoose.startSession();
+    let existing;
+    let updated;
+    let finalAmount;
+    let finalCurrency;
+    let walletCurrency;
+    let walletCreditAmount;
+    let conversionNote;
+    let commissionOutcome = null;
+
+    try {
+        await session.withTransaction(async () => {
     // Pre-read to give clear error messages if status is already wrong
-    const existing = await DepositRequest.findById(depositId);
+    existing = await DepositRequest.findById(depositId).session(session);
     if (!existing) throw new NotFoundError('DepositRequest');
 
     if (existing.status === DEPOSIT_STATUS.APPROVED) {
@@ -205,10 +226,10 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     }
 
     // ── Resolve final amount & currency (admin overrides take priority) ────
-    const finalAmount = Number(parseFloat(
+    finalAmount = Number(parseFloat(
         adminOverrides.amount ?? existing.requestedAmount
     ).toFixed(2));
-    const finalCurrency = (
+    finalCurrency = (
         adminOverrides.currency || existing.currency || 'USD'
     ).toUpperCase();
 
@@ -234,10 +255,10 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         $setFields.adminNotes = String(adminOverrides.adminNotes).trim();
     }
 
-    const updated = await DepositRequest.findOneAndUpdate(
+    updated = await DepositRequest.findOneAndUpdate(
         { _id: depositId, status: DEPOSIT_STATUS.PENDING },
         { $set: $setFields },
-        { new: true }
+        { new: true, session }
     );
 
     if (!updated) {
@@ -252,11 +273,8 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     //
     // Case 1 (same currency): Deposit SAR, wallet SAR → credit exact amount.
     // Case 2 (cross-currency): Deposit EGP, wallet SAR → EGP → USD → SAR.
-    const userDoc = await User.findById(updated.userId).select('currency');
-    const walletCurrency = (userDoc?.currency ?? 'USD').toUpperCase();
-
-    let walletCreditAmount;
-    let conversionNote;
+    const userDoc = await User.findById(updated.userId).select('currency').session(session);
+    walletCurrency = (userDoc?.currency ?? 'USD').toUpperCase();
 
     if (finalCurrency === walletCurrency) {
         // Same currency — direct credit, no conversion loss
@@ -273,13 +291,32 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         conversionNote = `${finalAmount} ${finalCurrency} → ${amountInUsd} USD → ${walletCreditAmount} ${walletCurrency}`;
     }
 
+    await runTestHook(testHooks.beforeWalletUpdate, { deposit: updated });
+
     // Credit the wallet
     await creditWalletDirect({
         userId: updated.userId,
         amount: walletCreditAmount,
         reference: updated._id,
         description: `Deposit #${updated._id.toString().slice(-6)} (${finalAmount} ${finalCurrency})`,
+        session,
+        testHooks: testHooks.wallet,
     });
+
+    await runTestHook(testHooks.afterWalletCreditBeforeCommission, { deposit: updated });
+
+    commissionOutcome = await processDepositReferralCommission({
+        deposit: updated,
+        sourceAmount: finalAmount,
+        sourceCurrency: finalCurrency,
+        sourceCompletedAt: updated.reviewedAt,
+        session,
+        testHooks: testHooks.commission,
+    });
+        });
+    } finally {
+        await session.endSession();
+    }
 
     // ── Audit: fire-and-forget ────────────────────────────────────────────
     const actorId = auditContext?.actorId ?? adminId;
@@ -302,6 +339,8 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
             walletCurrency,
             walletCreditAmount,
             conversionNote,
+            referralCommissionOutcome: commissionOutcome?.outcome ?? null,
+            referralCommissionId: commissionOutcome?.commission?._id?.toString() ?? null,
             reviewedBy: adminId.toString(),
         },
     });
@@ -326,8 +365,14 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         .populate('userId', 'name email avatar currency walletBalance')
         .populate('reviewedBy', 'name email');
 
-    // Notification: fire-and-forget
-    notifyDepositApproved(populated);
+    const notificationFn = testHooks.notifyDepositApproved || notifyDepositApproved;
+    try {
+        Promise.resolve(notificationFn(populated)).catch((err) => {
+            console.error('Deposit approval notification failed:', err.message);
+        });
+    } catch (err) {
+        console.error('Deposit approval notification failed:', err.message);
+    }
 
     return populated;
 };
@@ -352,27 +397,49 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
  * @returns {Promise<DepositRequest>}
  */
 const rejectDeposit = async (depositId, adminId, adminNotes = null, auditContext = null) => {
-    const deposit = await DepositRequest.findById(depositId);
-    if (!deposit) throw new NotFoundError('DepositRequest');
+    const existing = await DepositRequest.findById(depositId);
+    if (!existing) throw new NotFoundError('DepositRequest');
 
-    if (deposit.status === DEPOSIT_STATUS.REJECTED) {
+    if (existing.status === DEPOSIT_STATUS.REJECTED) {
         throw new BusinessRuleError(
             'This deposit request has already been rejected.',
             'DEPOSIT_ALREADY_REJECTED'
         );
     }
-    if (deposit.status === DEPOSIT_STATUS.APPROVED) {
+    if (existing.status === DEPOSIT_STATUS.APPROVED) {
         throw new BusinessRuleError(
             'An approved deposit cannot be rejected. It has already been credited.',
             'DEPOSIT_ALREADY_APPROVED'
         );
     }
 
-    deposit.status = DEPOSIT_STATUS.REJECTED;
-    deposit.reviewedBy = adminId;
-    deposit.reviewedAt = new Date();
-    if (adminNotes) deposit.adminNotes = adminNotes;
-    await deposit.save();
+    const setFields = {
+        status: DEPOSIT_STATUS.REJECTED,
+        reviewedBy: adminId,
+        reviewedAt: new Date(),
+    };
+    if (adminNotes) setFields.adminNotes = adminNotes;
+
+    const deposit = await DepositRequest.findOneAndUpdate(
+        { _id: depositId, status: DEPOSIT_STATUS.PENDING },
+        { $set: setFields },
+        { new: true }
+    );
+
+    if (!deposit) {
+        const current = await DepositRequest.findById(depositId);
+        if (!current) throw new NotFoundError('DepositRequest');
+        if (current.status === DEPOSIT_STATUS.APPROVED) {
+            throw new BusinessRuleError(
+                'An approved deposit cannot be rejected. It has already been credited.',
+                'DEPOSIT_ALREADY_APPROVED'
+            );
+        }
+        throw new BusinessRuleError(
+            'This deposit request has already been rejected.',
+            'DEPOSIT_ALREADY_REJECTED'
+        );
+    }
 
     // Audit: fire-and-forget after save
     createAuditLog({
@@ -383,9 +450,9 @@ const rejectDeposit = async (depositId, adminId, adminNotes = null, auditContext
         entityId: deposit._id,
         metadata: {
             userId: deposit.userId.toString(),
-            requestedAmount: deposit.requestedAmount,
-            currency: deposit.currency,
-            amountUsd: deposit.amountUsd,
+            requestedAmount: existing.requestedAmount,
+            currency: existing.currency,
+            amountUsd: existing.amountUsd,
             adminNotes: adminNotes || null,
             reviewedBy: adminId.toString(),
         },

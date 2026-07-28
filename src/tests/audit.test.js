@@ -438,7 +438,7 @@ describe('[5] Integration – Order refund', () => {
 
         expect(refundLog).not.toBeNull();
         expect(refundLog.entityId.toString()).toBe(order._id.toString());
-        expect(refundLog.metadata.totalRefunded).toBe(100);
+        expect(refundLog.metadata.totalRefund).toBe(100);
 
         expect(creditLog).not.toBeNull();
         expect(creditLog.entityId.toString()).toBe(customer._id.toString());
@@ -499,13 +499,17 @@ describe('[6] Integration – Auth events', () => {
     });
 
     it('PENDING login attempt creates USER_LOGIN_BLOCKED log', async () => {
+        const group = await createGroup({ name: 'PendingLoginGroup', percentage: 0 });
         const email = `blocked-${Date.now()}@test.com`;
         const password = 'ValidPass@1';
-        await register({ name: 'Pending User', email, password });
-
-        // Mark as email-verified so the PENDING status gate is reached
-        // (this test is specifically about the admin-approval blocked path)
-        await User.findOneAndUpdate({ email }, { verified: true });
+        await createCustomer({
+            groupId: group._id,
+            name: 'Pending User',
+            email,
+            password,
+            status: USER_STATUS.PENDING,
+            verified: true,
+        });
 
         await flushAudit();
         await AuditLog.collection.deleteMany({});  // isolate

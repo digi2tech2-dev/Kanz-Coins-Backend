@@ -9,10 +9,20 @@
  */
 
 const { MongoMemoryReplSet } = require('mongodb-memory-server');
+const fs = require('fs');
+const path = require('path');
 
 module.exports = async () => {
+    const dbPath = path.resolve(
+        __dirname,
+        '../../.tmp',
+        `mongo-memory-${process.pid}-${Date.now()}`
+    );
+    await fs.promises.mkdir(dbPath, { recursive: true });
+
     // one-node replica set is enough for transactions
     const replSet = await MongoMemoryReplSet.create({
+        instanceOpts: [{ launchTimeout: 30000, dbPath }],
         replSet: { count: 1, storageEngine: 'wiredTiger' },
     });
 
@@ -29,4 +39,5 @@ module.exports = async () => {
 
     // Attach to global so globalTeardown can stop it
     global.__MONGOD__ = replSet;
+    global.__MONGOD_DBPATHS__ = [dbPath];
 };

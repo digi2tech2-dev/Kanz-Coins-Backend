@@ -245,6 +245,17 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
 
             // Extract order ID from data.order_id
             const innerData = data.data ?? data;
+            const normalizedStatus = _normaliseAlkasrStatus(innerData.status ?? data.status);
+            if (normalizedStatus === 'Cancelled') {
+                return {
+                    success: false,
+                    providerOrderId: null,
+                    providerStatus: 'Cancelled',
+                    rawResponse: data,
+                    errorMessage: innerData.message ?? data.message ?? innerData.error ?? data.error ?? innerData.msg ?? data.msg ?? 'AlkasrVip rejected the order',
+                };
+            }
+
             const providerOrderId = innerData.order_id ?? innerData.id ?? innerData.orderId ?? null;
 
             if (!providerOrderId) {
@@ -260,7 +271,7 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
             return {
                 success: true,
                 providerOrderId: String(providerOrderId),
-                providerStatus: _normaliseAlkasrStatus(innerData.status ?? data.status),
+                providerStatus: normalizedStatus,
                 rawResponse: data,
                 errorMessage: null,
             };

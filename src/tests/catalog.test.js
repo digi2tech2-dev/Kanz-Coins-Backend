@@ -113,7 +113,7 @@ describe('[1] providerCatalog.service — syncProviderProducts()', () => {
         await catalogService.syncProviderProducts(provider._id, { products: V2 });
 
         const pp = await ProviderProduct.findOne({ provider: provider._id, externalProductId: 'CP-001' });
-        expect(pp.rawPrice).toBe(15.00);
+        expect(pp.rawPrice).toBe('15');
         expect(pp.minQty).toBe(3);
         expect(pp.maxQty).toBe(50);
         expect(pp.isActive).toBe(false);
@@ -264,7 +264,7 @@ describe('[3] product.service — createProductFromProvider()', () => {
             basePrice: 9.99,
             pricingMode: PRICING_MODES.MANUAL,
         });
-        expect(product.basePrice).toBe(9.99);
+        expect(product.basePrice).toBe('9.99');
     });
 
     it('pricingMode=sync uses rawPrice as basePrice (ignores admin input)', async () => {
@@ -274,7 +274,7 @@ describe('[3] product.service — createProductFromProvider()', () => {
             basePrice: 9999.00,       // should be overridden
             pricingMode: PRICING_MODES.SYNC,
         });
-        expect(product.basePrice).toBe(5.00);  // rawPrice wins
+        expect(product.basePrice).toBe('5');  // rawPrice wins
     });
 
     it('image override is stored on the product', async () => {
@@ -436,8 +436,8 @@ describe('[4] Order provider resolution via Product → ProviderProduct chain', 
             quantity: 1,
         });
 
-        expect(order.basePriceSnapshot).toBe(75.00);   // Product.basePrice, not rawPrice
-        expect(order.totalPrice).toBe(75.00);
+        expect(order.basePriceSnapshot).toBe('75');   // Product.basePrice, not rawPrice
+        expect(order.totalPrice).toBe('75');
     });
 
     it('changing rawPrice (manual mode) does NOT affect existing order snapshot', async () => {
@@ -454,8 +454,8 @@ describe('[4] Order provider resolution via Product → ProviderProduct chain', 
             quantity: 2,
         });
 
-        expect(order.basePriceSnapshot).toBe(80.00);
-        expect(order.totalPrice).toBe(160.00);
+        expect(order.basePriceSnapshot).toBe('80');
+        expect(order.totalPrice).toBe('160');
 
         // Sync with a new rawPrice — manual mode → Product.basePrice unchanged
         await catalogService.syncProviderProducts(provider._id, {
@@ -471,11 +471,11 @@ describe('[4] Order provider resolution via Product → ProviderProduct chain', 
 
         // Product.basePrice stays 80 (manual mode)
         const freshProduct = await Product.findById(product._id);
-        expect(freshProduct.basePrice).toBe(80.00);
+        expect(freshProduct.basePrice).toBe('80');
 
         // Order snapshots completely unchanged
         const freshOrder = await Order.findById(order._id);
-        expect(freshOrder.basePriceSnapshot).toBe(80.00);
-        expect(freshOrder.totalPrice).toBe(160.00);
+        expect(freshOrder.basePriceSnapshot).toBe('80');
+        expect(freshOrder.totalPrice).toBe('160');
     });
 });

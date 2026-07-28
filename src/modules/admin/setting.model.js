@@ -59,6 +59,16 @@ const DEFAULT_SETTINGS = [
     { key: 'paymentCountryAccounts', value: [], description: 'Country-specific payment accounts' },
     { key: 'paymentInstructions', value: '', description: 'General payment instructions shown to customers' },
     { key: 'whatsappNumber', value: '', description: 'WhatsApp number for customer support' },
+    { key: 'referralDefaultCommissionPercent', value: '1', description: 'Default referral commission percent' },
+    {
+        key: 'referralPayoutMethods',
+        value: [
+            { id: 'wallet', name: 'محفظة البرنامج', enabled: true, requiresAccount: false, discountPercent: 0, kind: 'wallet_credit', sortOrder: 0 },
+            { id: 'vodafone', name: 'فودافون كاش', enabled: true, requiresAccount: true, discountPercent: 0, kind: 'manual_external', sortOrder: 10 },
+            { id: 'instapay', name: 'إنستا باي', enabled: true, requiresAccount: true, discountPercent: 0, kind: 'manual_external', sortOrder: 20 },
+        ],
+        description: 'Referral payout methods shown to customers',
+    },
 ];
 
 /**

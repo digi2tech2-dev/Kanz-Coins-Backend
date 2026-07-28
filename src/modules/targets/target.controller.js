@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs/promises');
+const path = require('path');
 const targetService = require('./target.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
@@ -7,6 +9,13 @@ const { BusinessRuleError } = require('../../shared/errors/AppError');
 
 const parsePage = (v) => Math.max(1, parseInt(v, 10) || 1);
 const parseLimit = (v) => Math.min(100, Math.max(1, parseInt(v, 10) || 20));
+const uploadsRoot = path.resolve(__dirname, '../../../uploads');
+
+const cleanupUploadedProof = async (proofPath) => {
+    const absolutePath = path.resolve(__dirname, '../../..', proofPath || '');
+    if (!absolutePath.startsWith(`${uploadsRoot}${path.sep}`)) return;
+    await fs.unlink(absolutePath).catch(() => null);
+};
 
 const createTargetOrder = catchAsync(async (req, res) => {
     if (!req.file) {
@@ -16,25 +25,47 @@ const createTargetOrder = catchAsync(async (req, res) => {
         );
     }
 
-    const { appId, coinAmount, senderId, transferNumber, transactionNumber, paymentMethod } = req.body;
-    const screenshotProof = `uploads/targets/${req.file.filename}`;
-
-    const order = await targetService.createTargetOrder({
-        userId: req.user._id,
+    const {
         appId,
         coinAmount,
         senderId,
         transferNumber,
         transactionNumber,
         paymentMethod,
-        screenshotProof,
-        auditContext: {
-            actorId: req.user._id,
-            actorRole: 'CUSTOMER',
-            ipAddress: req.ip ?? null,
-            userAgent: req.get('User-Agent') ?? null,
-        },
-    });
+        paymentMethodId,
+        idempotencyKey: bodyIdempotencyKey,
+    } = req.body;
+    const screenshotProof = `uploads/targets/${req.file.filename}`;
+    const idempotencyKey = String(req.get('Idempotency-Key') || bodyIdempotencyKey || '').trim() || null;
+
+    let order;
+    try {
+        order = await targetService.createTargetOrder({
+            userId: req.user._id,
+            appId,
+            coinAmount,
+            senderId,
+            transferNumber,
+            transactionNumber,
+            paymentMethod,
+            paymentMethodId,
+            screenshotProof,
+            idempotencyKey,
+            auditContext: {
+                actorId: req.user._id,
+                actorRole: 'CUSTOMER',
+                ipAddress: req.ip ?? null,
+                userAgent: req.get('User-Agent') ?? null,
+            },
+        });
+    } catch (err) {
+        await cleanupUploadedProof(screenshotProof);
+        throw err;
+    }
+
+    if (order?.$locals?.idempotentReplay) {
+        await cleanupUploadedProof(screenshotProof);
+    }
 
     sendCreated(res, order, 'Target order submitted successfully. Pending admin review.');
 });

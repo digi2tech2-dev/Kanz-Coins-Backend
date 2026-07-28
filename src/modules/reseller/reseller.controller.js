@@ -7,6 +7,7 @@ const { calculateFinalPrice } = require('../orders/pricing.service');
 const { convertUsdToUserCurrency } = require('../../services/currencyConverter.service');
 const { sendSuccess, sendCreated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
+const { buildPublicWalletSummary } = require('../../shared/utils/walletSummary');
 
 const toPublicProduct = async (product, reseller) => {
     const percentage = Number(reseller.groupId?.percentage || 0);
@@ -60,17 +61,17 @@ const buildOrderFields = ({ playerId, orderFieldsValues, dynamicFields, customIn
 
 const getBalance = catchAsync(async (req, res) => {
     const reseller = req.reseller;
-    const walletBalance = Number(reseller.walletBalance || 0);
-    const creditLimit = Number(reseller.creditLimit || 0);
-    const creditUsed = Number(reseller.creditUsed || 0);
+    const walletSummary = buildPublicWalletSummary(reseller);
 
     sendSuccess(res, {
         email: reseller.email || req.user?.email || null,
-        balance: Number((walletBalance + creditLimit).toFixed(2)),
-        walletBalance,
-        creditLimit,
-        creditUsed,
-        currency: reseller.currency || 'USD',
+        balance: walletSummary.availableBalance,
+        walletBalance: walletSummary.walletBalance,
+        creditLimit: walletSummary.creditLimit,
+        creditUsed: walletSummary.creditUsed,
+        availableCredit: walletSummary.availableCredit,
+        availableBalance: walletSummary.availableBalance,
+        currency: walletSummary.currency,
     });
 });
 

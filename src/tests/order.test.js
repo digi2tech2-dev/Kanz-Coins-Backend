@@ -173,6 +173,32 @@ describe('Insufficient funds', () => {
         expect(user.creditUsed).toBe(200);
     });
 
+    it('allows a purchase that reaches the exact credit limit', async () => {
+        const customer = await createCustomer({
+            groupId: defaultGroup._id,
+            walletBalance: -30,
+            creditLimit: 100,
+            creditUsed: 30,
+        });
+        const product = await createProduct({ basePrice: 70, minQty: 1, maxQty: 1 });
+
+        const { order } = await orderService.createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1,
+            availableBalance: 9999,
+            creditUsed: -9999,
+            totalPrice: 1,
+        });
+
+        expect(Number(order.totalPrice)).toBe(70);
+
+        const user = await freshUser(customer._id);
+        expect(user.walletBalance).toBe(-100);
+        expect(user.creditUsed).toBe(100);
+        expect(user.availableBalance).toBe(0);
+    });
+
     it('rejects order when it would exceed credit limit', async () => {
         const customer = await createCustomer({
             groupId: defaultGroup._id,
@@ -191,6 +217,34 @@ describe('Insufficient funds', () => {
         const user = await freshUser(customer._id);
         expect(user.walletBalance).toBe(0);
         expect(user.creditUsed).toBe(0);
+    });
+
+    it('does not trust client-supplied balance or price fields for affordability', async () => {
+        const customer = await createCustomer({
+            groupId: defaultGroup._id,
+            walletBalance: 0,
+            creditLimit: 0,
+            creditUsed: 0,
+        });
+        const product = await createProduct({ basePrice: 100, minQty: 1, maxQty: 1 });
+
+        await expect(orderService.createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1,
+            availableBalance: 100000,
+            walletBalance: 100000,
+            creditLimit: 100000,
+            creditUsed: -100000,
+            totalPrice: 0.01,
+        })).rejects.toMatchObject({
+            code: 'INSUFFICIENT_FUNDS',
+        });
+
+        const user = await freshUser(customer._id);
+        expect(user.walletBalance).toBe(0);
+        expect(user.creditUsed).toBe(0);
+        expect(await countTransactions(customer._id)).toBe(0);
     });
 
     it('rejects order when walletBalance is zero and creditLimit is zero', async () => {

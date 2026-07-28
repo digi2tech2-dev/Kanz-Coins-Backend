@@ -23,12 +23,12 @@ const registerValidation = [
     body('currency')
         .optional()
         .trim()
-        .isLength({ min: 2, max: 10 }).withMessage('Currency code must be between 2 and 10 characters'),
+        .isLength({ min: 3, max: 3 }).withMessage('Currency code must be 3 characters'),
 
     body('country')
         .optional()
         .trim()
-        .isLength({ max: 100 }),
+        .isLength({ min: 2, max: 2 }).withMessage('Country code must be 2 characters'),
 
     body('phone')
         .optional()
@@ -39,6 +39,12 @@ const registerValidation = [
         .optional()
         .trim()
         .isLength({ max: 100 }),
+
+    body(['referralCode', 'refCode', 'ref', 'inviteCode'])
+        .optional({ checkFalsy: true })
+        .trim()
+        .isLength({ min: 6, max: 32 }).withMessage('Invitation code must be between 6 and 32 characters')
+        .matches(/^[A-Za-z0-9]+$/).withMessage('Invitation code must contain letters and numbers only'),
 ];
 
 const loginValidation = [

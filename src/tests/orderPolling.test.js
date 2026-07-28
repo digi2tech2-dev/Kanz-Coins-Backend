@@ -70,6 +70,8 @@ beforeAll(() => connectTestDB());
 afterAll(() => disconnectTestDB());
 beforeEach(() => clearCollections());
 
+const uniqueOrderNumber = () => `POLL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
 // =============================================================================
 // FIXTURE FACTORIES
 // =============================================================================
@@ -125,6 +127,7 @@ const makeProcessingOrder = ({ userId, productId, groupId, providerOrderId = 900
     Order.create({
         userId,
         productId,
+        orderNumber: uniqueOrderNumber(),
         quantity: 1,
         unitPrice: 10,
         totalPrice: 10,
@@ -223,7 +226,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         expect(updated.lastCheckedAt).not.toBeNull();
     });
 
-    it('transitions a Cancelled order to ORDER_STATUS.FAILED and refunds wallet', async () => {
+    it('transitions a Cancelled order to ORDER_STATUS.CANCELED and refunds wallet', async () => {
         const order = await makeProcessingOrder({
             userId: customer._id,
             productId: productChain.product._id,
@@ -243,7 +246,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         expect(stats.failed).toBe(1);
 
         const updated = await Order.findById(order._id);
-        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.status).toBe(ORDER_STATUS.CANCELED);
         expect(updated.failedAt).not.toBeNull();
         expect(updated.refunded).toBe(true);  // refund applied
 
@@ -283,6 +286,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         await Order.create({
             userId: customer._id,
             productId: productChain.product._id,
+            orderNumber: uniqueOrderNumber(),
             quantity: 1,
             unitPrice: 10,
             totalPrice: 10,
@@ -305,6 +309,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         const order = await Order.create({
             userId: customer._id,
             productId: productChain.product._id,
+            orderNumber: uniqueOrderNumber(),
             quantity: 1,
             unitPrice: 10,
             totalPrice: 10,

@@ -2,7 +2,7 @@
 
 const { Router } = require('express');
 const userController = require('./user.controller');
-const { updateUserValidation } = require('./user.validation');
+const { updateUserValidation, updateMyProfileValidation } = require('./user.validation');
 const validate = require('../../shared/middlewares/validate');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
@@ -30,7 +30,7 @@ router.get('/me', userController.getMyProfile);
  * @desc   Update own profile (name, email, phone, username, password)
  * @access Any authenticated user
  */
-router.patch('/me', userController.updateMyProfile);
+router.patch('/me', updateMyProfileValidation, validate, userController.updateMyProfile);
 
 /**
  * @route  PATCH /api/users/me/avatar

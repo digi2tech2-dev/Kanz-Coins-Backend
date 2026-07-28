@@ -28,8 +28,10 @@ const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
 const { getHighestPercentageGroup } = require('../groups/group.service');
+const { Currency } = require('../currency/currency.model');
 const emailService = require('../../services/email.service');
 const {
+    AppError,
     AuthenticationError,
     ConflictError,
     BusinessRuleError,
@@ -37,6 +39,12 @@ const {
 } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const {
+    normalizeIncomingReferralCode,
+    resolveReferralOwnerForNewUser,
+    buildReferralAssignment,
+    createUserWithReferralCodeRetry,
+} = require('../referrals/referral.service');
 
 // ─── Private Helpers ──────────────────────────────────────────────────────────
 
@@ -82,6 +90,40 @@ const _hashOtp = (raw) =>
 const _generateTwoFactorOtp = () =>
     crypto.randomInt(0, 1000000).toString().padStart(6, '0');
 
+const _normalizeCountry = (country) => {
+    const value = String(country || '').trim().toUpperCase();
+    if (!value) return null;
+    if (!/^[A-Z]{2}$/.test(value)) {
+        throw new AppError('Country must be a 2-letter country code.', 400, 'COUNTRY_INVALID');
+    }
+    return value;
+};
+
+const _normalizeCurrency = async (currency, { required = false } = {}) => {
+    const value = String(currency || '').trim().toUpperCase();
+    if (!value) {
+        if (required) {
+            throw new AppError('Currency is required.', 400, 'CURRENCY_INVALID');
+        }
+        return null;
+    }
+
+    if (!/^[A-Z]{3}$/.test(value)) {
+        throw new AppError('Currency must be a 3-letter ISO code.', 400, 'CURRENCY_INVALID');
+    }
+
+    const currencyDoc = await Currency.findOne({ code: value });
+    if (!currencyDoc) {
+        throw new AppError('Currency is invalid.', 400, 'CURRENCY_INVALID');
+    }
+
+    if (!currencyDoc.isActive) {
+        throw new AppError('Currency is inactive.', 400, 'CURRENCY_INACTIVE');
+    }
+
+    return currencyDoc.code;
+};
+
 const _safeCompareHash = (candidateHash, storedHash) => {
     if (!candidateHash || !storedHash) return false;
 
@@ -106,10 +148,26 @@ const _safeCompareHash = (candidateHash, storedHash) => {
  *  4. verified = false — user must click email link before login is allowed.
  *  5. A verification email is dispatched (fire-and-forget safe).
  */
-const register = async ({ name, email, password, currency, country, phone, username }) => {
+const register = async ({
+    name,
+    email,
+    password,
+    currency,
+    country,
+    phone,
+    username,
+    referralCode,
+    refCode,
+    ref,
+    inviteCode,
+}) => {
     // ── 1. Prevent duplicate accounts ─────────────────────────────────────────
+    const normalizedReferralCode = normalizeIncomingReferralCode(referralCode, refCode, ref, inviteCode);
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
+        if (normalizedReferralCode && existing.referralCode === normalizedReferralCode) {
+            throw new AppError('You cannot use your own invitation code.', 400, 'SELF_REFERRAL_NOT_ALLOWED');
+        }
         throw new ConflictError('email already exists');
     }
 
@@ -122,13 +180,20 @@ const register = async ({ name, email, password, currency, country, phone, usern
 
     // ── 2. Pricing group ──────────────────────────────────────────────────────
     const group = await getHighestPercentageGroup();
+    const normalizedCurrency = currency
+        ? await _normalizeCurrency(currency)
+        : 'USD';
+    const normalizedCountry = _normalizeCountry(country);
+    const referralOwner = normalizedReferralCode
+        ? await resolveReferralOwnerForNewUser(normalizedReferralCode, email)
+        : null;
 
     // ── 3. Verification token ─────────────────────────────────────────────────
     const { rawToken, hashedToken } = _generateVerificationToken();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);  // +24 h
 
     // ── 4. Create user ────────────────────────────────────────────────────────
-    const user = await User.create({
+    const user = await createUserWithReferralCodeRetry({
         name,
         email,
         password,
@@ -138,10 +203,11 @@ const register = async ({ name, email, password, currency, country, phone, usern
         verified: false,
         emailVerificationToken: hashedToken,
         emailVerificationExpires: expiresAt,
-        currency: currency || 'USD',
-        ...(country ? { country } : {}),
+        currency: normalizedCurrency,
+        ...(normalizedCountry ? { country: normalizedCountry } : {}),
         ...(phone ? { phone } : {}),
         ...(username ? { username } : {}),
+        ...buildReferralAssignment(referralOwner),
     });
 
     // ── 5. Audit (fire-and-forget) ────────────────────────────────────────────

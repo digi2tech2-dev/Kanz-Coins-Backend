@@ -28,14 +28,23 @@
 const { Router } = require('express');
 const me = require('./me.controller');
 const depositController = require('../deposits/deposit.controller');
+const referralCommissionService = require('../referrals/referralCommission.service');
+const referralDashboardService = require('../referrals/referralDashboard.service');
+const referralPayoutController = require('../referralPayouts/referralPayout.controller');
+const referralPayoutService = require('../referralPayouts/referralPayout.service');
+const subAgentRequestController = require('../subAgentRequests/subAgentRequest.controller');
 const authenticate = require('../../shared/middlewares/authenticate');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const catchAsync = require('../../shared/utils/catchAsync');
+const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
+const { BusinessRuleError } = require('../../shared/errors/AppError');
 const { body, param, query } = require('express-validator');
 const validate = require('../../shared/middlewares/validate');
 
 const depositUpload = createUpload('deposits');
 const orderFieldUpload = createUpload('order-fields');
+const subAgentProofUpload = createUpload('sub-agent-proofs');
 
 const router = Router();
 
@@ -78,6 +87,86 @@ router.put(
 
 router.get('/wallet', me.getWallet);
 router.get('/wallet/transactions', me.getTransactions);
+
+router.get('/referrals/dashboard', catchAsync(async (req, res) => {
+    const dashboard = await referralDashboardService.getCustomerReferralDashboard(req.user._id, {
+        limit: req.query.limit,
+    });
+    sendSuccess(res, { dashboard }, 'Referral dashboard retrieved');
+}));
+
+router.get('/referral-payout-methods', catchAsync(async (_req, res) => {
+    const methods = await referralDashboardService.getReferralPayoutMethods({ activeOnly: true });
+    sendSuccess(res, { methods }, 'Referral payout methods retrieved');
+}));
+
+router.get('/referral-commissions', catchAsync(async (req, res) => {
+    const result = await referralCommissionService.listReferralCommissionsForReferrer(req.user._id, {
+        page: req.query.page,
+        limit: req.query.limit,
+        status: req.query.status,
+        currency: req.query.currency,
+    });
+    sendPaginated(res, result.commissions, result.pagination, 'Referral commissions retrieved');
+}));
+
+router.get('/referral-commissions/summary', catchAsync(async (req, res) => {
+    const [summary, grouped] = await Promise.all([
+        referralCommissionService.getReferralCommissionSummaryForReferrer(req.user._id),
+        referralPayoutService.buildSummaryGroups(req.user._id),
+    ]);
+    sendSuccess(res, { summary, ...grouped }, 'Referral commission summary retrieved');
+}));
+
+router.post('/referral-payouts', catchAsync(referralPayoutController.createMyPayout));
+router.get(
+    '/referral-payouts',
+    [
+        query('page').optional().isInt({ min: 1 }),
+        query('limit').optional().isInt({ min: 1, max: 100 }),
+        query('status').optional().isString().trim(),
+        query('method').optional().isString().trim(),
+        query('currency').optional().isString().trim().isLength({ min: 3, max: 3 }),
+    ],
+    validate,
+    catchAsync(referralPayoutController.listMyPayouts)
+);
+router.get(
+    '/referral-payouts/:id',
+    [param('id').isMongoId().withMessage('Invalid payout ID')],
+    validate,
+    catchAsync(referralPayoutController.getMyPayout)
+);
+
+const uploadSubAgentProof = (req, res, next) => {
+    subAgentProofUpload.single('proofImage')(req, res, (err) => {
+        if (!err) return next();
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return next(new BusinessRuleError('Sub-agent proof file is too large.', 'SUB_AGENT_PROOF_INVALID'));
+        }
+        if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+            return next(new BusinessRuleError('Unexpected sub-agent proof field.', 'SUB_AGENT_PROOF_INVALID'));
+        }
+        return next(err);
+    });
+};
+
+router.post(
+    '/sub-agent-requests',
+    uploadSubAgentProof,
+    subAgentRequestController.createMyRequest
+);
+
+router.get('/sub-agent-requests/current', subAgentRequestController.getMyCurrentRequest);
+router.get(
+    '/sub-agent-requests',
+    [
+        query('page').optional().isInt({ min: 1 }),
+        query('limit').optional().isInt({ min: 1, max: 100 }),
+    ],
+    validate,
+    subAgentRequestController.listMyRequests
+);
 
 router.post(
     '/upload/order-field-image',

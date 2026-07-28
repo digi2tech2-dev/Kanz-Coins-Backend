@@ -2,14 +2,41 @@
 
 const { User, ROLES, USER_STATUS } = require('./user.model');
 const Group = require('../groups/group.model');
+const { Currency } = require('../currency/currency.model');
 const { recalculateCreditUsed } = require('../wallet/wallet.service');
-const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { AppError, NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { notifyAccountApproved } = require('../notifications/notification.service');
+const {
+    normalizeIncomingReferralCode,
+    resolveReferralOwnerForNewUser,
+} = require('../referrals/referral.service');
 
 /** Shared populate projection for group fields shown in user responses. */
 const GROUP_PROJECTION = 'name percentage isActive billingMode';
+
+const normalizeCountry = (country) => {
+    const value = String(country || '').trim().toUpperCase();
+    if (!value) return null;
+    if (!/^[A-Z]{2}$/.test(value)) {
+        throw new AppError('Country must be a 2-letter country code.', 400, 'COUNTRY_INVALID');
+    }
+    return value;
+};
+
+const normalizeActiveCurrency = async (currency) => {
+    const value = String(currency || '').trim().toUpperCase();
+    if (!value) return null;
+    if (!/^[A-Z]{3}$/.test(value)) {
+        throw new AppError('Currency must be a 3-letter ISO code.', 400, 'CURRENCY_INVALID');
+    }
+
+    const doc = await Currency.findOne({ code: value });
+    if (!doc) throw new AppError('Currency is invalid.', 400, 'CURRENCY_INVALID');
+    if (!doc.isActive) throw new AppError('Currency is inactive.', 400, 'CURRENCY_INACTIVE');
+    return doc.code;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN: QUERIES
@@ -217,14 +244,26 @@ const getMyProfile = async (userId) => {
         .select('-password')
         .populate('groupId', GROUP_PROJECTION);
     if (!user) throw new NotFoundError('User');
-    return user;
+    return user.toSafeObject ? user.toSafeObject() : user.toObject();
 };
 
 /**
  * Customer: Update own profile (self-service).
  * Only allows safe fields: name, email, phone, username, password.
  */
-const updateMyProfile = async (userId, { name, email, phone, username, password }) => {
+const updateMyProfile = async (userId, {
+    name,
+    email,
+    phone,
+    username,
+    password,
+    country,
+    currency,
+    referralCode,
+    refCode,
+    ref,
+    inviteCode,
+}) => {
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
 
@@ -232,6 +271,29 @@ const updateMyProfile = async (userId, { name, email, phone, username, password 
     if (email !== undefined) user.email = email;
     if (phone !== undefined) user.phone = phone;
     if (username !== undefined) user.username = username;
+
+    if (country !== undefined) {
+        user.country = normalizeCountry(country);
+    }
+
+    if (currency !== undefined) {
+        user.currency = await normalizeActiveCurrency(currency);
+    }
+
+    const incomingReferralCode = normalizeIncomingReferralCode(referralCode, refCode, ref, inviteCode);
+    if (incomingReferralCode) {
+        const referralOwner = await resolveReferralOwnerForNewUser(incomingReferralCode, user.email);
+
+        if (user.referredBy) {
+            if (String(user.referredBy) === String(referralOwner._id)) {
+                await user.save();
+                return user.toSafeObject ? user.toSafeObject() : user.toObject();
+            }
+            throw new AppError('Referral relationship is already assigned or cannot be changed.', 400, 'REFERRAL_ALREADY_ASSIGNED');
+        }
+
+        throw new AppError('Referral relationship is already assigned or cannot be changed.', 400, 'REFERRAL_ALREADY_ASSIGNED');
+    }
 
     if (password) {
         // The User model's pre-save hook should hash the password

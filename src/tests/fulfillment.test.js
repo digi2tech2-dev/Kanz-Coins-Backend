@@ -42,6 +42,8 @@ const makeMockProvider = (overrides = {}) => ({
     getMyInfo: overrides.getMyInfo ?? jest.fn().mockResolvedValue({}),
 });
 
+const uniqueOrderNumber = () => `T-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
 /**
  * Create an Order document bypassing the service.
  * makeOrderDoc does NOT modify the user's walletBalance in MongoDB.
@@ -54,6 +56,7 @@ const makeOrderDoc = async (userId, overrides = {}) => {
     const [order] = await Order.create([{
         userId,
         productId: product._id,
+        orderNumber: uniqueOrderNumber(),
         quantity: 1,
         unitPrice: 50,
         totalPrice: 50,
@@ -83,19 +86,19 @@ describe('[1] Status Mapper', () => {
         expect(toInternalStatus('Pending')).toBe(ORDER_STATUS.PROCESSING);
     });
 
-    it("maps 'Cancelled' to FAILED", () => {
-        expect(toInternalStatus('Cancelled')).toBe(ORDER_STATUS.FAILED);
+    it("maps 'Cancelled' to CANCELED", () => {
+        expect(toInternalStatus('Cancelled')).toBe(ORDER_STATUS.CANCELED);
     });
 
     it('is case-insensitive', () => {
         expect(toInternalStatus('COMPLETED')).toBe(ORDER_STATUS.COMPLETED);
         expect(toInternalStatus('pending')).toBe(ORDER_STATUS.PROCESSING);
-        expect(toInternalStatus('cancelled')).toBe(ORDER_STATUS.FAILED);
-        expect(toInternalStatus('canceled')).toBe(ORDER_STATUS.FAILED);
+        expect(toInternalStatus('cancelled')).toBe(ORDER_STATUS.CANCELED);
+        expect(toInternalStatus('canceled')).toBe(ORDER_STATUS.CANCELED);
     });
 
-    it('throws on unknown status', () => {
-        expect(() => toInternalStatus('Unknown')).toThrow(/Unknown provider status/);
+    it('keeps unknown status in PROCESSING for safe retry', () => {
+        expect(toInternalStatus('Unknown')).toBe(ORDER_STATUS.PROCESSING);
     });
 
     it('isTerminal returns true for Completed and Cancelled', () => {
@@ -163,7 +166,7 @@ describe('[2] executeOrder -- provider cases', () => {
         expect(updated.refunded).toBe(false);
     });
 
-    it('Case C: success=true + Cancelled -> FAILED + wallet refunded', async () => {
+    it('Case C: success=true + Cancelled -> CANCELED + wallet refunded', async () => {
         const order = await makeOrderDoc(customer._id);
 
         const provider = makeMockProvider({
@@ -181,7 +184,7 @@ describe('[2] executeOrder -- provider cases', () => {
 
         const { order: updated, refunded } = await executeOrder(order._id, provider);
 
-        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.status).toBe(ORDER_STATUS.CANCELED);
         expect(updated.refunded).toBe(true);
         expect(refunded).toBe(true);
 
@@ -382,7 +385,7 @@ describe('[4] processOrderStatusResult', () => {
         expect(fresh.refunded).toBe(false);
     });
 
-    it('Cancelled -> order FAILED + wallet refunded', async () => {
+    it('Cancelled -> order CANCELED + wallet refunded', async () => {
         const order = await makeOrderDoc(customer._id);
 
         const result = await processOrderStatusResult(order, {
@@ -393,7 +396,7 @@ describe('[4] processOrderStatusResult', () => {
 
         expect(result.action).toBe('failed');
         const fresh = await Order.findById(order._id);
-        expect(fresh.status).toBe(ORDER_STATUS.FAILED);
+        expect(fresh.status).toBe(ORDER_STATUS.CANCELED);
         expect(fresh.refunded).toBe(true);
     });
 
@@ -476,7 +479,7 @@ describe('[5] pollProcessingOrders -- cron batch', () => {
         const freshO1 = await Order.findById(o1._id);
         const freshO3 = await Order.findById(o3._id);
         expect(freshO1.status).toBe(ORDER_STATUS.COMPLETED);
-        expect(freshO3.status).toBe(ORDER_STATUS.FAILED);
+        expect(freshO3.status).toBe(ORDER_STATUS.CANCELED);
     });
 
     it('completed orders are NOT included in the next poll', async () => {
@@ -572,7 +575,7 @@ describe('[6] createOrder -- AUTOMATIC executionType', () => {
         expect(order.executionType).toBe(ORDER_EXECUTION_TYPES.AUTOMATIC);
     });
 
-    it('AUTOMATIC product WITHOUT provider -> order status is PENDING', async () => {
+    it('AUTOMATIC product WITHOUT provider -> order starts PROCESSING', async () => {
         const { order } = await createOrder({
             userId: customer._id,
             productId: autoProduct._id,
@@ -580,9 +583,9 @@ describe('[6] createOrder -- AUTOMATIC executionType', () => {
             provider: null,
         });
 
-        // isAutomatic = executionType=AUTOMATIC AND provider!=null
-        // Without provider, falls back to PENDING
-        expect(order.status).toBe(ORDER_STATUS.PENDING);
+        // executeOrder self-resolves the provider after commit, so automatic
+        // products start in PROCESSING even when no test provider is injected.
+        expect(order.status).toBe(ORDER_STATUS.PROCESSING);
     });
 
     it('MANUAL product always stays PENDING regardless of provider', async () => {
@@ -608,7 +611,7 @@ describe('[6] createOrder -- AUTOMATIC executionType', () => {
             provider: null,
         });
 
-        expect(order.totalPrice).toBe(100);
+        expect(order.totalPrice).toBe('100');
 
         const freshCustomer = await User.findById(customer._id);
         expect(freshCustomer.walletBalance).toBe(900);

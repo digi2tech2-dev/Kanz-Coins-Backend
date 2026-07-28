@@ -18,6 +18,9 @@ require('../modules/providers/provider.model');
 require('../modules/providers/providerProduct.model');
 // Currency module — ensure model is registered + indexes synced before tests
 require('../modules/currency/currency.model');
+require('../modules/referrals/referralCommission.model');
+require('../modules/referralPayouts/referralPayout.model');
+require('../modules/subAgentRequests/subAgentRequest.model');
 
 // ─── DB Lifecycle ─────────────────────────────────────────────────────────────
 

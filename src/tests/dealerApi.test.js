@@ -131,7 +131,7 @@ describe('DealerApiAdapter dynamic products', () => {
             expect.objectContaining(expectedDynamicProduct(
                 'ibulala_dynamic_coins',
                 'Ibulala Dynamic Coins (Any Amount)',
-                { price: '0.00000001', maxQty: 500000000 }
+                { price: '0.00000000001', maxQty: 500000000 }
             )),
         ]);
         expect(client.get).not.toHaveBeenCalled();
@@ -159,7 +159,7 @@ describe('DealerApiAdapter dynamic products', () => {
         expect(getDealerDynamicApp({ providerCode: 'Karak Chat' })?.key).toBe('karak');
         expect(getDealerDynamicApp({ code: 'ibulalachat' })?.key).toBe('ibulala');
         expect(getDealerDynamicProduct({ slug: 'ibulala-chat' })?.id).toBe('ibulala_dynamic_coins');
-        expect(getDealerDynamicProduct({ slug: 'ibulala-chat' })?.price).toBe('0.00000001');
+        expect(getDealerDynamicProduct({ slug: 'ibulala-chat' })?.price).toBe('0.00000000001');
         expect(isDealerDynamicProvider({ name: 'Ibulala Chat' })).toBe(true);
         expect(isDealerDynamicProvider({ name: 'Unknown Dealer App' })).toBe(false);
     });

@@ -17,6 +17,13 @@ const DEPOSIT_STATUS = Object.freeze({
     REJECTED: 'REJECTED',
 });
 
+const REFERRAL_COMMISSION_PROCESSING_STATUS = Object.freeze({
+    NOT_APPLICABLE: 'NOT_APPLICABLE',
+    PENDING: 'PENDING',
+    PROCESSED: 'PROCESSED',
+    FAILED: 'FAILED',
+});
+
 const depositRequestSchema = new mongoose.Schema(
     {
         /** Customer who created this request. */
@@ -161,6 +168,38 @@ const depositRequestSchema = new mongoose.Schema(
             type: Date,
             default: null,
         },
+
+        referralCommissionProcessingStatus: {
+            type: String,
+            enum: Object.values(REFERRAL_COMMISSION_PROCESSING_STATUS),
+            default: REFERRAL_COMMISSION_PROCESSING_STATUS.NOT_APPLICABLE,
+            index: true,
+        },
+
+        referralCommissionOutcome: {
+            type: String,
+            trim: true,
+            default: null,
+            maxlength: 128,
+        },
+
+        referralCommissionId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ReferralCommission',
+            default: null,
+        },
+
+        referralCommissionProcessedAt: {
+            type: Date,
+            default: null,
+        },
+
+        referralCommissionError: {
+            type: String,
+            trim: true,
+            default: null,
+            maxlength: 256,
+        },
     },
     {
         timestamps: true,  // createdAt + updatedAt
@@ -198,4 +237,8 @@ depositRequestSchema.virtual('isPending').get(function () {
 
 const DepositRequest = mongoose.model('DepositRequest', depositRequestSchema);
 
-module.exports = { DepositRequest, DEPOSIT_STATUS };
+module.exports = {
+    DepositRequest,
+    DEPOSIT_STATUS,
+    REFERRAL_COMMISSION_PROCESSING_STATUS,
+};

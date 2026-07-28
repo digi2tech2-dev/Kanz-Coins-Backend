@@ -1,5 +1,42 @@
 # Wallet System
 
+## Current Wallet-Balance Contract
+
+`walletBalance` is the actual wallet ledger balance. It can be positive, zero, or negative when a user spends against `creditLimit`.
+
+Canonical reporting fields:
+
+```text
+walletBalance = actual ledger balance
+creditLimit = maximum permitted overdraft
+creditUsed = max(0, min(abs(walletBalance), creditLimit)) when walletBalance is negative, otherwise 0
+availableCredit = max(0, creditLimit - creditUsed)
+availableBalance = max(0, walletBalance + creditLimit)
+coins = legacy auth/profile alias for walletBalance
+balance = legacy auth/profile alias for walletBalance
+```
+
+Reseller and client compatibility balance endpoints expose one `balance` field; on those endpoints `balance` means spendable balance (`availableBalance`).
+
+Example:
+
+```json
+{
+  "walletBalance": -30,
+  "creditLimit": 100,
+  "creditUsed": 30,
+  "availableCredit": 70,
+  "availableBalance": 70,
+  "coins": -30,
+  "balance": -30,
+  "currency": "USD"
+}
+```
+
+Public API `availableBalance` is clamped to zero for legacy overdrawn data. Internal affordability remains authoritative and compares the raw sum `walletBalance + creditLimit >= authoritativeCost`.
+
+Order affordability and pricing are backend-authoritative. Customer-supplied fields such as `walletBalance`, `creditLimit`, `creditUsed`, `availableBalance`, `balance`, `coins`, or `totalPrice` are ignored for purchase validation.
+
 ## Overview
 
 Every user has an embedded wallet (`walletBalance` on the `User` document). All financial operations — order debits, refunds, and deposit credits — are implemented as single atomic MongoDB aggregation-pipeline updates, eliminating all race conditions without requiring a distributed lock.

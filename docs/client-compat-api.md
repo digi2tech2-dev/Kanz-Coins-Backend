@@ -45,7 +45,7 @@ Response:
 }
 ```
 
-`balance` is the authenticated reseller available balance in the user's currency.
+`balance` is the authenticated reseller spendable balance in the user's currency. It is derived from `availableBalance = max(0, walletBalance + creditLimit)` and does not subtract `creditUsed` again.
 
 ## Products
 

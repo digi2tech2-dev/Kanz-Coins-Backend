@@ -16,6 +16,7 @@ const productService = require('../products/product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { AuthorizationError, BusinessRuleError, NotFoundError } = require('../../shared/errors/AppError');
+const { buildPublicWalletSummary } = require('../../shared/utils/walletSummary');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ const getProfile = catchAsync(async (req, res) => {
 
     const groupData = user.groupId;
     const billingMode = groupData?.billingMode || 'standard';
+    const walletSummary = buildPublicWalletSummary(user);
 
     sendSuccess(res, {
         _id: user._id,
@@ -91,7 +93,13 @@ const getProfile = catchAsync(async (req, res) => {
         status: user.status,
         verified: user.verified,
         currency: user.currency,
-        walletBalance: user.walletBalance,
+        walletBalance: walletSummary.walletBalance,
+        creditLimit: walletSummary.creditLimit,
+        creditUsed: walletSummary.creditUsed,
+        availableCredit: walletSummary.availableCredit,
+        availableBalance: walletSummary.availableBalance,
+        coins: walletSummary.walletBalance,
+        balance: walletSummary.walletBalance,
         group: groupData,
         billingMode,
         quantityLimit: user.quantityLimit || 0,
@@ -149,8 +157,9 @@ const updateApiSettings = catchAsync(async (req, res) => {
  * Wallet summary: balance + last 5 transactions.
  */
 const getWallet = catchAsync(async (req, res) => {
-    const user = await User.findById(req.user._id).select('walletBalance currency creditLimit');
+    const user = await User.findById(req.user._id).select('walletBalance currency creditLimit creditUsed');
     if (!user) throw new NotFoundError('User');
+    const walletSummary = buildPublicWalletSummary(user);
 
     const recent = await WalletTransaction.find({ userId: req.user._id })
         .sort({ createdAt: -1 })
@@ -159,8 +168,14 @@ const getWallet = catchAsync(async (req, res) => {
         .lean();
 
     sendSuccess(res, {
-        walletBalance: user.walletBalance,
-        currency: user.currency,
+        walletBalance: walletSummary.walletBalance,
+        creditLimit: walletSummary.creditLimit,
+        creditUsed: walletSummary.creditUsed,
+        availableCredit: walletSummary.availableCredit,
+        availableBalance: walletSummary.availableBalance,
+        coins: walletSummary.walletBalance,
+        balance: walletSummary.walletBalance,
+        currency: walletSummary.currency,
         recentTransactions: recent,
     }, 'Wallet summary retrieved.');
 });

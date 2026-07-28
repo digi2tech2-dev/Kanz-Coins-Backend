@@ -21,6 +21,13 @@ const TRANSACTION_STATUS = Object.freeze({
     FAILED: 'FAILED',
 });
 
+const WALLET_TRANSACTION_SOURCE_TYPES = Object.freeze({
+    ORDER: 'ORDER',
+    DEPOSIT: 'DEPOSIT',
+    REFERRAL_PAYOUT: 'REFERRAL_PAYOUT',
+    ADMIN_ADJUSTMENT: 'ADMIN_ADJUSTMENT',
+});
+
 const walletTransactionSchema = new mongoose.Schema(
     {
         userId: {
@@ -59,6 +66,26 @@ const walletTransactionSchema = new mongoose.Schema(
             default: null,
         },
 
+        sourceType: {
+            type: String,
+            enum: Object.values(WALLET_TRANSACTION_SOURCE_TYPES),
+            default: null,
+            index: true,
+        },
+
+        sourceId: {
+            type: mongoose.Schema.Types.ObjectId,
+            default: null,
+            index: true,
+        },
+
+        sourceKey: {
+            type: String,
+            trim: true,
+            default: null,
+            maxlength: [160, 'sourceKey cannot exceed 160 characters'],
+        },
+
         status: {
             type: String,
             enum: Object.values(TRANSACTION_STATUS),
@@ -79,7 +106,20 @@ const walletTransactionSchema = new mongoose.Schema(
 // Compound index for efficient user transaction history queries
 walletTransactionSchema.index({ userId: 1, createdAt: -1 });
 walletTransactionSchema.index({ reference: 1 });
+walletTransactionSchema.index(
+    { sourceKey: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { sourceKey: { $type: 'string' } },
+        name: 'unique_wallet_transaction_source_key',
+    }
+);
 
 const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 
-module.exports = { WalletTransaction, TRANSACTION_TYPES, TRANSACTION_STATUS };
+module.exports = {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    TRANSACTION_STATUS,
+    WALLET_TRANSACTION_SOURCE_TYPES,
+};

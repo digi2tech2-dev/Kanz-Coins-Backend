@@ -4,6 +4,14 @@ const { User, USER_STATUS } = require('../users/user.model');
 const { WalletTransaction, TRANSACTION_TYPES } = require('./walletTransaction.model');
 const { NotFoundError, BusinessRuleError, InsufficientFundsError } = require('../../shared/errors/AppError');
 
+const runTestHook = async (hook, payload) => {
+    if (!hook) return;
+    if (process.env.NODE_ENV !== 'test') {
+        throw new Error('Wallet test hooks are only available in NODE_ENV=test.');
+    }
+    await hook(payload);
+};
+
 const safeRound = (value, decimals = 2) => {
     const factor = Math.pow(10, decimals);
     return Math.round((Number(value) || 0) * factor) / factor;
@@ -56,6 +64,9 @@ const _createTransactionRecord = async ({
     balanceBefore,
     balanceAfter,
     reference,
+    sourceType = null,
+    sourceId = null,
+    sourceKey = null,
     description,
     session,
 }) => {
@@ -66,6 +77,9 @@ const _createTransactionRecord = async ({
         balanceBefore,
         balanceAfter,
         reference,
+        sourceType,
+        sourceId,
+        sourceKey: sourceKey || null,
         status: 'COMPLETED',
         description,
     };
@@ -299,7 +313,17 @@ const refundWalletAtomic = async ({
  * Atomically credit a flat amount directly to a user's walletBalance.
  * Session is optional — works on standalone MongoDB instances.
  */
-const creditWalletDirect = async ({ userId, amount, reference = null, description = '', session }) => {
+const creditWalletDirect = async ({
+    userId,
+    amount,
+    reference = null,
+    sourceType = null,
+    sourceId = null,
+    sourceKey = null,
+    description = '',
+    session,
+    testHooks = {},
+}) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Credit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
@@ -327,6 +351,17 @@ const creditWalletDirect = async ({ userId, amount, reference = null, descriptio
 
     const oldBal = Number(oldUser.walletBalance) || 0;
 
+    await runTestHook(testHooks.afterWalletMutationBeforeLedger, {
+        userId,
+        amount,
+        reference,
+        sourceType,
+        sourceId,
+        sourceKey,
+        balanceBefore: oldBal,
+        balanceAfter: safeRound(oldBal + amount),
+    });
+
     const transaction = await _createTransactionRecord({
         userId,
         type: TRANSACTION_TYPES.CREDIT,
@@ -334,8 +369,18 @@ const creditWalletDirect = async ({ userId, amount, reference = null, descriptio
         balanceBefore: oldBal,
         balanceAfter: safeRound(oldBal + amount),
         reference,
+        sourceType,
+        sourceId,
+        sourceKey,
         description,
         session,
+    });
+
+    await runTestHook(testHooks.afterWalletLedgerCreation, {
+        userId,
+        amount,
+        reference,
+        transaction,
     });
 
     return { transaction };

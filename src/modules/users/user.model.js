@@ -3,6 +3,8 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const config = require('../../config/config');
+const { generateReferralCode } = require('../../shared/utils/referralCode');
+const { buildPublicWalletSummary, buildWalletSummary } = require('../../shared/utils/walletSummary');
 
 /**
  * User roles enum — single source of truth.
@@ -32,6 +34,11 @@ const USER_STATUS = Object.freeze({
     REJECTED: 'REJECTED',
 });
 
+const RESELLER_STATUS = Object.freeze({
+    NONE: 'NONE',
+    APPROVED: 'APPROVED',
+});
+
 const userSchema = new mongoose.Schema(
     {
         name: {
@@ -49,6 +56,76 @@ const userSchema = new mongoose.Schema(
             lowercase: true,
             trim: true,
             match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address'],
+        },
+
+        referralCode: {
+            type: String,
+            unique: true,
+            sparse: true,
+            uppercase: true,
+            trim: true,
+            immutable: true,
+            match: [/^[A-Z0-9]{6,32}$/, 'referralCode must be 6-32 uppercase letters or digits'],
+        },
+
+        referredBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            immutable: true,
+            index: true,
+        },
+
+        referredAt: {
+            type: Date,
+            default: null,
+            immutable: true,
+        },
+
+        referralEligibleUntil: {
+            type: Date,
+            default: null,
+            immutable: true,
+            index: true,
+        },
+
+        referralCommissionPercentOverride: {
+            type: Number,
+            default: null,
+            min: [0, 'Referral commission override cannot be negative'],
+            max: [50, 'Referral commission override cannot exceed 50%'],
+            validate: {
+                validator(value) {
+                    return value === null || value === undefined || Number.isFinite(value);
+                },
+                message: 'Referral commission override must be a finite number',
+            },
+        },
+
+        referralCommissionStoppedAt: {
+            type: Date,
+            default: null,
+        },
+
+        resellerStatus: {
+            type: String,
+            enum: {
+                values: Object.values(RESELLER_STATUS),
+                message: 'resellerStatus must be NONE or APPROVED',
+            },
+            default: RESELLER_STATUS.NONE,
+            index: true,
+        },
+
+        resellerApprovedAt: {
+            type: Date,
+            default: null,
+        },
+
+        subAgentRequestPending: {
+            type: Boolean,
+            default: false,
+            select: false,
         },
 
         password: {
@@ -302,6 +379,14 @@ const userSchema = new mongoose.Schema(
             match: [/^[A-Z]{3}$/, 'currency must be a 3-letter ISO 4217 code (e.g. USD, SAR)'],
         },
 
+        country: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            default: null,
+            match: [/^[A-Z]{2}$/, 'country must be a 2-letter ISO 3166-1 alpha-2 code'],
+        },
+
         // ── Avatar ───────────────────────────────────────────────────────────
         /**
          * URL to the user's profile picture.
@@ -350,14 +435,12 @@ userSchema.virtual('isActive').get(function () {
  * walletBalance may be negative (up to -creditLimit) after credit usage.
  */
 userSchema.virtual('availableBalance').get(function () {
-    const balance = this.walletBalance || 0;
-    const credit = this.creditLimit || 0;
-    return parseFloat((balance + credit).toFixed(2));
+    return buildWalletSummary(this).availableBalance;
 });
 
 /** How much credit remains available (undrawn). */
 userSchema.virtual('availableCredit').get(function () {
-    return parseFloat(Math.max(0, (this.creditLimit || 0) - (this.creditUsed || 0)).toFixed(2));
+    return buildWalletSummary(this).availableCredit;
 });
 
 /** Remaining quantity quota for quantity_only billing. */
@@ -365,7 +448,25 @@ userSchema.virtual('quantityRemaining').get(function () {
     return Math.max(0, (this.quantityLimit || 0) - (this.quantityUsed || 0));
 });
 
+userSchema.virtual('missingProfileFields').get(function () {
+    const missing = [];
+    if (!this.country) missing.push('country');
+    if (!this.currency) missing.push('currency');
+    return missing;
+});
+
+userSchema.virtual('profileCompletionRequired').get(function () {
+    return Boolean(this.googleId && this.missingProfileFields.length > 0);
+});
+
 // ─── Pre-save Hook: Hash Password ────────────────────────────────────────────
+userSchema.pre('validate', function (next) {
+    if (this.isNew && !this.referralCode) {
+        this.referralCode = generateReferralCode();
+    }
+    next();
+});
+
 userSchema.pre('save', async function (next) {
     // Skip if no password set (OAuth users) or password not modified
     if (!this.password || !this.isModified('password')) return next();
@@ -410,6 +511,17 @@ userSchema.methods.compareApiToken = async function (candidateToken) {
  */
 userSchema.methods.toSafeObject = function () {
     const obj = this.toObject();
+    const walletSummary = buildPublicWalletSummary(obj);
+    Object.assign(obj, {
+        walletBalance: walletSummary.walletBalance,
+        creditLimit: walletSummary.creditLimit,
+        creditUsed: walletSummary.creditUsed,
+        availableCredit: walletSummary.availableCredit,
+        availableBalance: walletSummary.availableBalance,
+        currency: walletSummary.currency,
+        coins: walletSummary.walletBalance,
+        balance: walletSummary.walletBalance,
+    });
     delete obj.password;
     delete obj.twoFactorOtp;
     delete obj.twoFactorOtpExpires;
@@ -420,5 +532,5 @@ userSchema.methods.toSafeObject = function () {
 
 const User = mongoose.model('User', userSchema);
 
-module.exports = { User, ROLES, USER_STATUS };
+module.exports = { User, ROLES, USER_STATUS, RESELLER_STATUS };
 module.exports.User = User; // CommonJS default export convenience

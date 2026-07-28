@@ -219,7 +219,7 @@ describe('Client compatibility API authentication and profile', () => {
             const res = await rawGet('/client/api/profile', authHeaders(token, header));
             expect(res.status).toBe(200);
             expect(res.body).toEqual({
-                balance: '140',
+                balance: '150',
                 email: reseller.email,
             });
         }
@@ -227,7 +227,7 @@ describe('Client compatibility API authentication and profile', () => {
         const aliasRes = await rawGet('/api/client/api/profile', authHeaders(token));
         expect(aliasRes.status).toBe(200);
         expect(aliasRes.body).toEqual({
-            balance: '140',
+            balance: '150',
             email: reseller.email,
         });
     });

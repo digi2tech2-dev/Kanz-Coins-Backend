@@ -24,6 +24,7 @@ const {
     isTargetAliasKey,
     normalizeTargetAliasKey,
 } = require('../providers/adapters/providerParams.helper');
+const { buildWalletSummary } = require('../../shared/utils/walletSummary');
 
 const PRODUCT_SELECT = [
     'compatProductId',
@@ -50,11 +51,9 @@ const toBalanceString = (value) => {
 };
 
 const getProfile = async (reseller) => {
-    const walletBalance = Number(reseller.walletBalance || 0);
-    const creditLimit = Number(reseller.creditLimit || 0);
-    const creditUsed = Number(reseller.creditUsed || 0);
+    const walletSummary = buildWalletSummary(reseller);
     return {
-        balance: toBalanceString(walletBalance + creditLimit - creditUsed),
+        balance: toBalanceString(walletSummary.availableBalance),
         email: reseller.email || null,
     };
 };
