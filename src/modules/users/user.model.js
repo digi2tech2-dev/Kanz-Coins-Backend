@@ -160,6 +160,34 @@ const userSchema = new mongoose.Schema(
         },
 
         /**
+         * Canonical profile-completion marker.
+         * Email/password registrations set this immediately because the signup
+         * form already collects the required profile fields. New Google users
+         * start with null and complete through the profile-completion flow.
+         */
+        profileCompletedAt: {
+            type: Date,
+            default: null,
+        },
+
+        /**
+         * One-time Google profile-completion token state.
+         * Raw tokens are only sent to the browser during the OAuth redirect;
+         * the database stores a SHA-256 hash and short expiry.
+         */
+        profileCompletionToken: {
+            type: String,
+            select: false,
+            default: null,
+        },
+
+        profileCompletionTokenExpires: {
+            type: Date,
+            select: false,
+            default: null,
+        },
+
+        /**
          * SHA-256 hash of the raw token sent in the verification email.
          * Raw token is NEVER stored here — only the hash.
          * Null once verified.
@@ -455,8 +483,17 @@ userSchema.virtual('missingProfileFields').get(function () {
     return missing;
 });
 
+userSchema.virtual('isProfileComplete').get(function () {
+    if (this.profileCompletedAt) return true;
+    if (!this.googleId) return true;
+
+    // Legacy Google users created before profileCompletedAt existed should keep
+    // access when they already have the required fields.
+    return this.missingProfileFields.length === 0;
+});
+
 userSchema.virtual('profileCompletionRequired').get(function () {
-    return Boolean(this.googleId && this.missingProfileFields.length > 0);
+    return Boolean(this.googleId && !this.isProfileComplete);
 });
 
 // ─── Pre-save Hook: Hash Password ────────────────────────────────────────────
@@ -525,6 +562,8 @@ userSchema.methods.toSafeObject = function () {
     delete obj.password;
     delete obj.twoFactorOtp;
     delete obj.twoFactorOtpExpires;
+    delete obj.profileCompletionToken;
+    delete obj.profileCompletionTokenExpires;
     delete obj.apiToken;
     delete obj.apiSecret;
     return obj;

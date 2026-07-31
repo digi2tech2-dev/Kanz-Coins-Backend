@@ -266,6 +266,7 @@ const updateMyProfile = async (userId, {
 }) => {
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
+    const wasProfileCompletionRequired = user.profileCompletionRequired;
 
     if (name !== undefined) user.name = name;
     if (email !== undefined) user.email = email;
@@ -286,6 +287,9 @@ const updateMyProfile = async (userId, {
 
         if (user.referredBy) {
             if (String(user.referredBy) === String(referralOwner._id)) {
+                if (wasProfileCompletionRequired && user.missingProfileFields.length === 0) {
+                    user.profileCompletedAt = user.profileCompletedAt || new Date();
+                }
                 await user.save();
                 return user.toSafeObject ? user.toSafeObject() : user.toObject();
             }
@@ -298,6 +302,10 @@ const updateMyProfile = async (userId, {
     if (password) {
         // The User model's pre-save hook should hash the password
         user.password = password;
+    }
+
+    if (wasProfileCompletionRequired && user.missingProfileFields.length === 0) {
+        user.profileCompletedAt = user.profileCompletedAt || new Date();
     }
 
     await user.save();

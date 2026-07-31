@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 const { Currency } = require('../modules/currency/currency.model');
 const { User, USER_STATUS } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
-const { register, login } = require('../modules/auth/auth.service');
+const { register, login, loginWithGoogle, completeGoogleProfile } = require('../modules/auth/auth.service');
 const {
     createGoogleOAuthState,
     consumeGoogleOAuthState,
@@ -587,5 +587,147 @@ describe('Google profile completion', () => {
         const result = await login({ email: fresh.email, password: 'SecurePass@1' });
         expect(result.token).toBeDefined();
         expect(result.user.referralCode).toBe(fresh.referralCode);
+    });
+
+    it('requires profile completion for a brand-new Google account before issuing a final token', async () => {
+        await seedCurrency();
+        await createGroup({ name: 'NewGoogleCompletionGroup', percentage: 0 });
+
+        const { user } = await resolveGoogleUser(googleProfile({
+            email: `new-google-completion-${Date.now()}@example.com`,
+            displayName: 'Google Complete Name',
+        }), { intent: 'signup' });
+
+        expect(user.name).toBe('Google Complete Name');
+        expect(user.email).toMatch(/@example\.com$/);
+        expect(user.profileCompletedAt).toBeNull();
+        expect(user.profileCompletionRequired).toBe(true);
+
+        const callbackResult = await loginWithGoogle(user);
+        expect(callbackResult.status).toBe('PROFILE_COMPLETION_REQUIRED');
+        expect(callbackResult.token).toBeUndefined();
+        expect(callbackResult.completionToken).toBeTruthy();
+    });
+
+    it('does not let default group assignment bypass Google profile completion', async () => {
+        await createGroup({ name: 'DefaultGroupDoesNotComplete', percentage: 99 });
+
+        const { user } = await resolveGoogleUser(googleProfile({
+            email: `group-incomplete-${Date.now()}@example.com`,
+        }), { intent: 'signup' });
+
+        expect(user.groupId).toBeTruthy();
+        expect(user.profileCompletedAt).toBeNull();
+        expect(user.profileCompletionRequired).toBe(true);
+    });
+
+    it('lets existing completed Google users log in directly', async () => {
+        await seedCurrency();
+        const group = await createGroup({ name: 'ExistingCompleteGoogleGroup', percentage: 0 });
+        const user = await createCustomer({
+            groupId: group._id,
+            email: `existing-complete-google-${Date.now()}@example.com`,
+            googleId: 'existing-complete-google',
+            country: 'EG',
+            currency: 'USD',
+            profileCompletedAt: new Date(),
+        });
+
+        const result = await loginWithGoogle(user);
+        expect(result.status).toBe('LOGIN_COMPLETE');
+        expect(result.token).toBeDefined();
+    });
+
+    it('returns existing incomplete Google users to completion', async () => {
+        const group = await createGroup({ name: 'ExistingIncompleteGoogleGroup', percentage: 0 });
+        const user = await User.create({
+            name: 'Existing Incomplete',
+            email: `existing-incomplete-google-${Date.now()}@example.com`,
+            googleId: 'existing-incomplete-google',
+            role: 'CUSTOMER',
+            groupId: group._id,
+            status: USER_STATUS.ACTIVE,
+            verified: true,
+            country: null,
+            currency: 'USD',
+            profileCompletedAt: null,
+        });
+
+        const result = await loginWithGoogle(user);
+        expect(result.status).toBe('PROFILE_COMPLETION_REQUIRED');
+        expect(result.completionToken).toBeTruthy();
+        expect(result.token).toBeUndefined();
+    });
+
+    it('successful Google completion marks the user complete and preserves referral assignment', async () => {
+        await seedCurrency();
+        const group = await createGroup({ name: 'TokenCompletionReferralGroup', percentage: 0 });
+        const referrer = await createCustomer({
+            groupId: group._id,
+            email: `token-completion-referrer-${Date.now()}@example.com`,
+        });
+        const { user } = await resolveGoogleUser(googleProfile({
+            email: `token-completion-google-${Date.now()}@example.com`,
+        }), {
+            intent: 'signup',
+            referralCode: referrer.referralCode,
+        });
+        const callbackResult = await loginWithGoogle(user);
+
+        const completed = await completeGoogleProfile({
+            completionToken: callbackResult.completionToken,
+            country: 'eg',
+            currency: 'usd',
+        });
+
+        expect(completed.status).toBe('LOGIN_COMPLETE');
+        expect(completed.token).toBeDefined();
+        expect(completed.user.profileCompletionRequired).toBe(false);
+
+        const fresh = await User.findById(user._id).select('+profileCompletionToken +profileCompletionTokenExpires');
+        expect(fresh.profileCompletedAt).toBeInstanceOf(Date);
+        expect(fresh.profileCompletionToken).toBeNull();
+        expect(fresh.profileCompletionTokenExpires).toBeNull();
+        expect(String(fresh.referredBy)).toBe(String(referrer._id));
+    });
+
+    it('rejects invalid, expired, and reused Google completion tokens', async () => {
+        await seedCurrency();
+        await createGroup({ name: 'TokenRejectionGroup', percentage: 0 });
+
+        await expect(completeGoogleProfile({
+            completionToken: 'not-a-real-token',
+            country: 'EG',
+            currency: 'USD',
+        })).rejects.toThrow(/invalid/i);
+
+        const { user: expiredUser } = await resolveGoogleUser(googleProfile({
+            email: `expired-token-google-${Date.now()}@example.com`,
+        }), { intent: 'signup' });
+        const expiredResult = await loginWithGoogle(expiredUser);
+        await User.updateOne(
+            { _id: expiredUser._id },
+            { $set: { profileCompletionTokenExpires: new Date(Date.now() - 1000) } }
+        );
+        await expect(completeGoogleProfile({
+            completionToken: expiredResult.completionToken,
+            country: 'EG',
+            currency: 'USD',
+        })).rejects.toThrow(/expired/i);
+
+        const { user: reusedUser } = await resolveGoogleUser(googleProfile({
+            email: `reused-token-google-${Date.now()}@example.com`,
+        }), { intent: 'signup' });
+        const reusedResult = await loginWithGoogle(reusedUser);
+        await completeGoogleProfile({
+            completionToken: reusedResult.completionToken,
+            country: 'EG',
+            currency: 'USD',
+        });
+        await expect(completeGoogleProfile({
+            completionToken: reusedResult.completionToken,
+            country: 'EG',
+            currency: 'USD',
+        })).rejects.toThrow(/invalid/i);
     });
 });

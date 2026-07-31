@@ -51,6 +51,12 @@ const authenticate = catchAsync(async (req, res, next) => {
         );
     }
 
+    if (currentUser.profileCompletionRequired) {
+        throw new AuthenticationError(
+            'Profile completion is required before accessing the platform.'
+        );
+    }
+
     // 5. Attach to request
     req.user = currentUser;
 

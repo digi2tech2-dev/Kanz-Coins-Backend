@@ -27,6 +27,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
+const Group = require('../groups/group.model');
 const { getHighestPercentageGroup } = require('../groups/group.service');
 const { Currency } = require('../currency/currency.model');
 const emailService = require('../../services/email.service');
@@ -49,6 +50,7 @@ const {
 // ─── Private Helpers ──────────────────────────────────────────────────────────
 
 const TWO_FACTOR_OTP_EXPIRY_MS = 5 * 60 * 1000;
+const PROFILE_COMPLETION_EXPIRY_MS = 15 * 60 * 1000;
 
 /** Sign full-session JWT for a user. */
 const signToken = (userId, role) =>
@@ -122,6 +124,17 @@ const _normalizeCurrency = async (currency, { required = false } = {}) => {
     }
 
     return currencyDoc.code;
+};
+
+const _assertActiveGroup = async (groupId) => {
+    const group = await Group.findById(groupId);
+    if (!group || !group.isActive) {
+        throw new BusinessRuleError(
+            'No active pricing group is assigned to this account. Please contact an administrator.',
+            'GROUP_INACTIVE'
+        );
+    }
+    return group;
 };
 
 const _safeCompareHash = (candidateHash, storedHash) => {
@@ -203,6 +216,7 @@ const register = async ({
         verified: false,
         emailVerificationToken: hashedToken,
         emailVerificationExpires: expiresAt,
+        profileCompletedAt: new Date(),
         currency: normalizedCurrency,
         ...(normalizedCountry ? { country: normalizedCountry } : {}),
         ...(phone ? { phone } : {}),
@@ -423,16 +437,25 @@ const resendVerification = async (email) => {
 
 /**
  * Called by the Google OAuth callback route after Passport succeeds.
- * Issues a JWT for the authenticated user.
+ * Issues a JWT for complete Google users, or a one-time profile-completion
+ * token when country/currency still need to be collected.
  *
  * Note: Google OAuth users bypass the email verification gate
  * because Google has already verified the email. They still need
  * admin approval (PENDING → ACTIVE) before accessing the platform.
  *
  * @param {Object} user  — User document from Passport strategy
- * @returns {{ token: string, user: Object, message?: string }}
+ * @returns {{ status: string, token?: string, completionToken?: string, user: Object, message?: string }}
  */
-const loginWithGoogle = (user) => {
+const issueGoogleProfileCompletionToken = async (user) => {
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    user.profileCompletionToken = _hashToken(rawToken);
+    user.profileCompletionTokenExpires = new Date(Date.now() + PROFILE_COMPLETION_EXPIRY_MS);
+    await user.save();
+    return rawToken;
+};
+
+const loginWithGoogle = async (user) => {
     if (user.status === USER_STATUS.PENDING) {
         // Return a token-less response so the frontend can show the approval message.
         // Some frontends prefer a token even for pending users; adjust as needed.
@@ -449,6 +472,16 @@ const loginWithGoogle = (user) => {
         );
     }
 
+    if (user.profileCompletionRequired) {
+        const completionToken = await issueGoogleProfileCompletionToken(user);
+        return {
+            status: 'PROFILE_COMPLETION_REQUIRED',
+            completionToken,
+            user: user.toSafeObject(),
+            message: 'Profile completion is required.',
+        };
+    }
+
     const token = signToken(user._id, user.role);
 
     createAuditLog({
@@ -460,7 +493,63 @@ const loginWithGoogle = (user) => {
         metadata: { email: user.email, method: 'google-oauth' },
     });
 
-    return { token, user: user.toSafeObject() };
+    return { status: 'LOGIN_COMPLETE', token, user: user.toSafeObject() };
+};
+
+const completeGoogleProfile = async ({ completionToken, country, currency }) => {
+    if (!completionToken) {
+        throw new AuthenticationError('Profile completion token is required.');
+    }
+
+    const hashedToken = _hashToken(completionToken);
+    const user = await User.findOne({ profileCompletionToken: hashedToken })
+        .select('+profileCompletionToken +profileCompletionTokenExpires');
+
+    if (!user) {
+        throw new AuthenticationError('Profile completion token is invalid.');
+    }
+
+    if (!user.profileCompletionTokenExpires || user.profileCompletionTokenExpires.getTime() <= Date.now()) {
+        user.profileCompletionToken = null;
+        user.profileCompletionTokenExpires = null;
+        await user.save();
+        throw new AuthenticationError('Profile completion token has expired.');
+    }
+
+    if (!user.googleId) {
+        throw new AuthenticationError('Profile completion token is invalid.');
+    }
+
+    if (user.status !== USER_STATUS.ACTIVE) {
+        throw new AuthenticationError('Your account is not active. Contact an administrator.');
+    }
+
+    await _assertActiveGroup(user.groupId);
+
+    user.country = _normalizeCountry(country);
+    if (!user.country) {
+        throw new AppError('Country is required.', 400, 'COUNTRY_INVALID');
+    }
+
+    user.currency = await _normalizeCurrency(currency, { required: true });
+
+    user.profileCompletedAt = new Date();
+    user.profileCompletionToken = null;
+    user.profileCompletionTokenExpires = null;
+    await user.save();
+
+    const token = signToken(user._id, user.role);
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.LOGIN_SUCCESS,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email, method: 'google-profile-completion' },
+    });
+
+    return { status: 'LOGIN_COMPLETE', token, user: user.toSafeObject() };
 };
 
 // ─── generate2FASecret ────────────────────────────────────────────────────────
@@ -691,6 +780,7 @@ module.exports = {
     verifyEmail,
     resendVerification,
     loginWithGoogle,
+    completeGoogleProfile,
     generate2FASecret,
     enable2FA,
     disable2FA,

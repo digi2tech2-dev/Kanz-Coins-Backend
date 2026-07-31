@@ -27,6 +27,7 @@ const {
     enable2FAValidation,
     disable2FAValidation,
     verify2FAValidation,
+    completeGoogleProfileValidation,
 } = require('./auth.validation');
 const validate = require('../../shared/middlewares/validate');
 const authenticate = require('../../shared/middlewares/authenticate');
@@ -52,6 +53,14 @@ const requireGoogleConfig = (req, res, next) => {
     next();
 };
 
+const buildFrontendAuthRedirect = (params = {}) => {
+    const frontendBase = config.frontend.verifyRedirectUrl
+        .replace(/\/email-verified.*$/, '')
+        .replace(/\/+$/, '');
+    const query = new URLSearchParams(params);
+    return `${frontendBase}/auth?${query.toString()}`;
+};
+
 const startGoogleOAuth = (req, res, next) => {
     const state = createGoogleOAuthState({
         referralCode: req.query.referralCode || req.query.ref || req.query.refCode || req.query.inviteCode,
@@ -70,13 +79,21 @@ const verifyGoogleOAuthState = async (req, res, next) => {
         req.oauthState = await consumeGoogleOAuthState(req.query.state);
         return next();
     } catch (err) {
-        return next(err);
+        return res.redirect(buildFrontendAuthRedirect({
+            status: 'OAUTH_ERROR',
+            code: err.code || 'OAUTH_STATE_INVALID',
+        }));
     }
 };
 
 const finishGoogleOAuth = (req, res, next) => {
     return passport.authenticate('google', { session: false }, (err, user) => {
-        if (err) return next(err);
+        if (err) {
+            return res.redirect(buildFrontendAuthRedirect({
+                status: 'OAUTH_ERROR',
+                code: err.code || 'GOOGLE_AUTH_FAILED',
+            }));
+        }
         if (!user) return res.redirect('/api/auth/google/failure');
         req.user = user;
         return next();
@@ -158,10 +175,10 @@ router.get(
  * @access Public
  */
 router.get('/google/failure', (req, res) => {
-    res.status(401).json({
-        success: false,
-        message: 'Google authentication failed. Please try again.',
-    });
+    res.redirect(buildFrontendAuthRedirect({
+        status: 'OAUTH_ERROR',
+        code: 'GOOGLE_AUTH_FAILED',
+    }));
 });
 
 // ─── Two-Factor Authentication ─────────────────────────────────────────────────────
@@ -171,6 +188,14 @@ router.get('/google/failure', (req, res) => {
  * @desc   Send email OTP before enabling 2FA
  * @access Private (requires valid JWT)
  */
+router.post(
+    '/google/complete-profile',
+    authLimiter,
+    completeGoogleProfileValidation,
+    validate,
+    authController.completeGoogleProfile
+);
+
 router.post('/2fa/generate', authenticate, authController.generate2FA);
 
 /**

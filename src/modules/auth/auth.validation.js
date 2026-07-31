@@ -86,10 +86,27 @@ const verify2FAValidation = [
         .isNumeric().withMessage('2FA code must contain only digits'),
 ];
 
+const completeGoogleProfileValidation = [
+    body('completionToken')
+        .notEmpty().withMessage('Profile completion token is required')
+        .isString().withMessage('Profile completion token must be a string'),
+
+    body('country')
+        .trim()
+        .notEmpty().withMessage('Country is required')
+        .isLength({ min: 2, max: 2 }).withMessage('Country code must be 2 characters'),
+
+    body('currency')
+        .trim()
+        .notEmpty().withMessage('Currency is required')
+        .isLength({ min: 3, max: 3 }).withMessage('Currency code must be 3 characters'),
+];
+
 module.exports = {
     registerValidation,
     loginValidation,
     enable2FAValidation,
     disable2FAValidation,
     verify2FAValidation,
+    completeGoogleProfileValidation,
 };
