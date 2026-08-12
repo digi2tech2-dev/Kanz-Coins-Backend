@@ -444,6 +444,11 @@ const createDeposit = catchAsync(async (req, res) => {
 
     const { requestedAmount, currency, paymentMethodId, notes } = req.body;
     const senderDetails = depositService.normalizeSenderDetails(req.body);
+    const paymentTransactionId = req.body.transactionId
+        || req.body.transactionNumber
+        || req.body.paymentReference
+        || senderDetails?.transactionNumber
+        || null;
 
     // ── Fetch current exchange rate ──────────────────────────────────────
     const { Currency } = require('../currency/currency.model');
@@ -480,6 +485,7 @@ const createDeposit = catchAsync(async (req, res) => {
         receiptImage,
         notes: notes || null,
         senderDetails,
+        paymentTransactionId,
         auditContext: {
             actorId: req.user._id,
             actorRole: 'CUSTOMER',

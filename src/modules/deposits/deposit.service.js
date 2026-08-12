@@ -16,6 +16,8 @@ const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('
 const { notifyNewDeposit, notifyDepositApproved, notifyDepositRejected } = require('../notifications/notification.service');
 const whatsappService = require('../whatsapp/whatsapp.service');
 
+const SYSTEM_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001');
+
 const runTestHook = async (hook, payload) => {
     if (!hook) return;
     if (process.env.NODE_ENV !== 'test') {
@@ -66,13 +68,29 @@ const normalizeSenderDetails = (source = {}) => {
             ? 'عنوان المحفظة المحول منها'
             : 'رقم المحفظة المحول منها')
     ).trim();
+    const transactionNumber = String(
+        details.transactionNumber
+        || details.transactionId
+        || details.paymentReference
+        || source.transactionNumber
+        || source.transactionId
+        || source.paymentReference
+        || source.transferTransactionId
+        || ''
+    ).trim();
 
     return {
         methodType: methodType.slice(0, 64),
         field: field.slice(0, 64),
         label: label.slice(0, 128),
         value: value.slice(0, 200),
+        transactionNumber: transactionNumber ? transactionNumber.slice(0, 64) : null,
     };
+};
+
+const normalizePaymentTransactionId = (value) => {
+    const trimmed = String(value || '').trim();
+    return trimmed ? trimmed.slice(0, 64) : null;
 };
 
 // =============================================================================
@@ -115,11 +133,17 @@ const createDepositRequest = async ({
     receiptImage,
     notes = null,
     senderDetails = null,
+    paymentTransactionId = null,
     auditContext = null,
 }) => {
     // Confirm user exists (belt-and-suspenders — middleware already checks ACTIVE)
     const user = await User.findById(userId).select('_id role name email');
     if (!user) throw new NotFoundError('User');
+
+    const normalizedPaymentTransactionId = normalizePaymentTransactionId(
+        paymentTransactionId
+        || senderDetails?.transactionNumber
+    );
 
     const deposit = await DepositRequest.create({
         userId,
@@ -131,6 +155,7 @@ const createDepositRequest = async ({
         receiptImage,
         notes,
         senderDetails,
+        paymentTransactionId: normalizedPaymentTransactionId,
         status: DEPOSIT_STATUS.PENDING,
     });
 
@@ -149,6 +174,7 @@ const createDepositRequest = async ({
             exchangeRate,
             amountUsd: deposit.amountUsd,
             senderDetails,
+            paymentTransactionId: normalizedPaymentTransactionId,
         },
         ipAddress: auditContext?.ipAddress ?? null,
         userAgent: auditContext?.userAgent ?? null,
@@ -164,6 +190,15 @@ const createDepositRequest = async ({
         });
     } catch (err) {
         console.error('WhatsApp Notification failed:', err.message);
+    }
+
+    try {
+        const paymentEventService = require('../paymentEvents/paymentEvent.service');
+        paymentEventService.matchExistingUnmatchedPaymentForDeposit(deposit._id).catch((err) => {
+            console.error('[PaymentEvent] Post-deposit matching failed:', err.message);
+        });
+    } catch (err) {
+        console.error('[PaymentEvent] Post-deposit matching unavailable:', err.message);
     }
 
     return deposit;
@@ -205,6 +240,7 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     let walletCreditAmount;
     let conversionNote;
     let commissionOutcome = null;
+    const reviewerId = adminId || null;
 
     try {
         await session.withTransaction(async () => {
@@ -240,8 +276,9 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     // ── Atomic compare-and-swap on { _id, status: PENDING } ──────────────
     const $setFields = {
         status: DEPOSIT_STATUS.APPROVED,
-        reviewedBy: adminId,
+        reviewedBy: reviewerId,
         reviewedAt: new Date(),
+        reviewSource: adminOverrides.reviewSource || 'ADMIN',
     };
 
     // Persist admin overrides on the deposit document if provided
@@ -253,6 +290,12 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     }
     if (adminOverrides.adminNotes) {
         $setFields.adminNotes = String(adminOverrides.adminNotes).trim();
+    }
+    if (adminOverrides.paymentEventId) {
+        $setFields.paymentEventId = adminOverrides.paymentEventId;
+    }
+    if (adminOverrides.autoVerifiedAt) {
+        $setFields.autoVerifiedAt = adminOverrides.autoVerifiedAt;
     }
 
     updated = await DepositRequest.findOneAndUpdate(
@@ -319,8 +362,8 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     }
 
     // ── Audit: fire-and-forget ────────────────────────────────────────────
-    const actorId = auditContext?.actorId ?? adminId;
-    const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.ADMIN;
+    const actorId = auditContext?.actorId ?? adminId ?? SYSTEM_ACTOR_ID;
+    const actorRole = auditContext?.actorRole ?? (adminId ? ACTOR_ROLES.ADMIN : ACTOR_ROLES.SYSTEM);
     const ipAddress = auditContext?.ipAddress ?? null;
     const userAgent = auditContext?.userAgent ?? null;
 
@@ -341,7 +384,9 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
             conversionNote,
             referralCommissionOutcome: commissionOutcome?.outcome ?? null,
             referralCommissionId: commissionOutcome?.commission?._id?.toString() ?? null,
-            reviewedBy: adminId.toString(),
+            reviewedBy: adminId?.toString?.() ?? null,
+            reviewSource: updated.reviewSource,
+            paymentEventId: updated.paymentEventId?.toString?.() ?? null,
         },
     });
 

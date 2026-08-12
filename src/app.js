@@ -22,6 +22,7 @@ const walletRoutes = require('./modules/wallet/wallet.routes');
 const auditRoutes = require('./modules/audit/audit.routes');
 const depositRoutes = require('./modules/deposits/deposit.routes');
 const providerRoutes = require('./modules/providers/provider.routes');
+const paymentEventRoutes = require('./modules/paymentEvents/paymentEvent.routes');
 const adminCatalogRoutes = require('./modules/admin/admin.catalog.routes');
 const adminSettingsService = require('./modules/admin/admin.settings.service');
 const adminRoutes = require('./modules/admin/admin.routes');    // ← dashboard router
@@ -71,6 +72,7 @@ app.use(
 );
 
 // ── Request Parsing ───────────────────────────────────────────────────────────
+app.use('/api/payment-events', apiLimiter, paymentEventRoutes);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

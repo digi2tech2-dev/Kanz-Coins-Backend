@@ -95,6 +95,15 @@ const config = {
                 .filter(Boolean)
             : DEFAULT_RECEIPT_OCR_KEYWORDS,
     },
+
+    vodafoneSmsBridge: {
+        enabled: parseBoolean(process.env.VODAFONE_SMS_BRIDGE_ENABLED, false),
+        hmacSecret: process.env.VODAFONE_SMS_HMAC_SECRET || '',
+        autoApprove: parseBoolean(process.env.VODAFONE_SMS_AUTO_APPROVE, false),
+        instapayAutoApprove: parseBoolean(process.env.VODAFONE_SMS_INSTAPAY_AUTO_APPROVE, false),
+        deviceId: process.env.VODAFONE_SMS_DEVICE_ID || 'kanz-vf-01',
+        maxEventAgeMinutes: parseNumber(process.env.VODAFONE_SMS_MAX_EVENT_AGE_MINUTES, 1440),
+    },
 };
 
 // Guard: fail fast if critical configs are missing

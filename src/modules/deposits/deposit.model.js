@@ -135,6 +135,21 @@ const depositRequestSchema = new mongoose.Schema(
                 maxlength: [200, 'sender detail value cannot exceed 200 characters'],
                 default: null,
             },
+            transactionNumber: {
+                type: String,
+                trim: true,
+                maxlength: [64, 'sender transaction number cannot exceed 64 characters'],
+                default: null,
+            },
+        },
+
+        /** Customer-entered payment/reference number, stored as a string to preserve leading zeros. */
+        paymentTransactionId: {
+            type: String,
+            trim: true,
+            maxlength: [64, 'paymentTransactionId cannot exceed 64 characters'],
+            default: null,
+            index: true,
         },
 
         /** Current lifecycle status. */
@@ -165,6 +180,25 @@ const depositRequestSchema = new mongoose.Schema(
 
         /** Timestamp of the admin review decision. */
         reviewedAt: {
+            type: Date,
+            default: null,
+        },
+
+        reviewSource: {
+            type: String,
+            enum: ['ADMIN', 'VODAFONE_SMS_AUTO'],
+            default: null,
+            index: true,
+        },
+
+        paymentEventId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'PaymentEvent',
+            default: null,
+            index: true,
+        },
+
+        autoVerifiedAt: {
             type: Date,
             default: null,
         },

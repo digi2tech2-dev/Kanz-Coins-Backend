@@ -54,6 +54,24 @@ const createDepositValidation = [
         .isString().withMessage('transferredFromNumber must be a string')
         .trim()
         .isLength({ max: 200 }).withMessage('transferredFromNumber cannot exceed 200 characters'),
+
+    body('transactionId')
+        .optional()
+        .isString().withMessage('transactionId must be a string')
+        .trim()
+        .isLength({ max: 64 }).withMessage('transactionId cannot exceed 64 characters'),
+
+    body('transactionNumber')
+        .optional()
+        .isString().withMessage('transactionNumber must be a string')
+        .trim()
+        .isLength({ max: 64 }).withMessage('transactionNumber cannot exceed 64 characters'),
+
+    body('paymentReference')
+        .optional()
+        .isString().withMessage('paymentReference must be a string')
+        .trim()
+        .isLength({ max: 64 }).withMessage('paymentReference cannot exceed 64 characters'),
 ];
 
 /**
