@@ -104,6 +104,11 @@ const registry = new Map([
     ['3amo card', AlkasrVipAdapter], // name
     ['3amocard', AlkasrVipAdapter],  // compact
 
+    // ── yazan card (Uses Alkasr Adapter) ─────────────────────────────────────
+    ['yazan-card', AlkasrVipAdapter], // slug
+    ['yazan card', AlkasrVipAdapter], // name
+    ['yazancard', AlkasrVipAdapter],  // compact
+
 
     // -- Ibra Store ------------------------------------------------------------
     ['ibra-store', IbraAdapter],
