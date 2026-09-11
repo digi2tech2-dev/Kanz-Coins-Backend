@@ -24,6 +24,10 @@ Authorization: Bearer <token>
 { "success": false, "message": "...", "code": "MACHINE_CODE", "statusCode": 422 }
 ```
 
+> Canonical B2B API documentation is separate because it uses an API-token
+> compatibility contract rather than this JWT envelope. See
+> [`client-compat-api.md`](client-compat-api.md) for `/client/api`.
+
 ---
 
 ## Table of Contents

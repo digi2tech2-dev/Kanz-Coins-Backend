@@ -13,8 +13,10 @@ const {
     USER_STATUS,
 } = require('./testHelpers');
 const { Category } = require('../modules/categories/category.model');
+const { Setting } = require('../modules/admin/setting.model');
 const { Order, ORDER_STATUS } = require('../modules/orders/order.model');
-const { mapProduct } = require('../modules/clientCompat/clientCompat.mappers');
+const { mapProduct, mapStatus } = require('../modules/clientCompat/clientCompat.mappers');
+const { compatRateLimitHandler } = require('../shared/middlewares/rateLimiter');
 
 let app;
 let server;
@@ -46,6 +48,33 @@ const rawGet = (path, headers = {}) => new Promise((resolve, reject) => {
     });
 
     req.on('error', reject);
+    req.end();
+});
+
+const rawPost = (path, body, headers = {}) => new Promise((resolve, reject) => {
+    const url = new URL(path, baseUrl);
+    const payload = JSON.stringify(body);
+    const req = http.request(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            ...headers,
+        },
+    }, (res) => {
+        let responseBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { responseBody += chunk; });
+        res.on('end', () => {
+            try {
+                resolve({ status: res.statusCode, headers: res.headers, body: responseBody ? JSON.parse(responseBody) : null });
+            } catch (err) {
+                reject(err);
+            }
+        });
+    });
+    req.on('error', reject);
+    req.write(payload);
     req.end();
 });
 
@@ -203,6 +232,17 @@ describe('Client compatibility API authentication and profile', () => {
         res = await rawGet('/client/api/profile', authHeaders(inactive.token));
         expect(res.status).toBe(403);
         expect(res.body.code).toBe(122);
+
+        const whitelisted = await createApiReseller({
+            token: 'whitelist-token',
+            userOverrides: { whitelistIps: ['198.51.100.5'] },
+        });
+        res = await rawGet('/client/api/profile', {
+            ...authHeaders(whitelisted.token),
+            'X-Forwarded-For': '203.0.113.10',
+        });
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual({ status: 'ERROR', code: 123, message: 'IP not allowed' });
     });
 
     test('accepts supported token headers and returns flat profile shape', async () => {
@@ -221,6 +261,7 @@ describe('Client compatibility API authentication and profile', () => {
             expect(res.body).toEqual({
                 balance: '150',
                 email: reseller.email,
+                currency: 'USD',
             });
         }
 
@@ -229,6 +270,7 @@ describe('Client compatibility API authentication and profile', () => {
         expect(aliasRes.body).toEqual({
             balance: '150',
             email: reseller.email,
+            currency: 'USD',
         });
     });
 });
@@ -269,6 +311,20 @@ describe('Client compatibility API products and content', () => {
         expect(mappedPackage.provider_price).toBe(10);
         expectNumericPriceFields(mappedPackage, { price: 10, basePrice: 10 });
         expect(mappedPackage.params).toEqual(['Player ID']);
+        expect(mappedPackage.fields).toEqual([
+            {
+                key: 'player_id',
+                label: 'Player ID',
+                type: 'text',
+                required: true,
+                options: [],
+            },
+        ]);
+        expect(mappedPackage).not.toHaveProperty('_id');
+        expect(mappedPackage).not.toHaveProperty('apiToken');
+        expect(mappedPackage).not.toHaveProperty('provider');
+        expect(mappedPackage).not.toHaveProperty('providerCredentials');
+        expect(mappedPackage).not.toHaveProperty('providerMapping');
         expect(mappedPackage.category_name).toBe('PUBG Global ID UC');
         expect(mappedPackage.available).toBe(true);
         expect(mappedPackage.qty_values).toBeNull();
@@ -426,6 +482,24 @@ describe('Client compatibility API products and content', () => {
         expect(typeof legacy.body.data[0].id).toBe('string');
     });
 
+    test('returns direct nested category content by numeric compatibility parent ID', async () => {
+        const { token } = await createApiReseller({ token: 'nested-content-token' });
+        const parent = await createCompatCategory({ name: 'Parent Category' });
+        const child = await createCompatCategory({ name: 'Child Category', parentCategory: parent._id });
+        const product = await createCompatProduct({ category: child._id.toString(), orderFields: [] });
+
+        const response = await rawGet(`/client/api/content/${parent.compatCategoryId}`, authHeaders(token));
+        expect(response.status).toBe(200);
+        expect(response.body.data.categories).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: child.compatCategoryId, parent_id: parent.compatCategoryId }),
+        ]));
+
+        const childResponse = await rawGet(`/client/api/content/${child.compatCategoryId}`, authHeaders(token));
+        expect(childResponse.body.data.products).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: product.compatProductId, parent_id: child.compatCategoryId }),
+        ]));
+    });
+
     test('mapper keeps fixed quantity lists and adds list aliases', () => {
         const mapped = mapProduct({
             product: {
@@ -480,6 +554,89 @@ describe('Client compatibility API products and content', () => {
 });
 
 describe('Client compatibility API orders', () => {
+    test('creates canonical POST orders with numeric product IDs and structured params', async () => {
+        const { reseller, token } = await createApiReseller({ token: 'canonical-post-token' });
+        const product = await createCompatProduct({
+            name: 'Canonical POST Product',
+            orderFields: [{ id: 'player', key: 'player_id', label: 'Player ID', type: 'text', required: true, isActive: true }],
+        });
+        const payload = {
+            product_id: product.compatProductId,
+            qty: 1,
+            order_uuid: 'canonical-post-order-1',
+            params: { player_id: '10026' },
+        };
+
+        const first = await rawPost('/client/api/orders', payload, authHeaders(token));
+        expect(first.status).toBe(200);
+        expect(first.headers['cache-control']).toContain('no-store');
+        expect(first.body).toMatchObject({
+            status: 'OK',
+            data: {
+                order_uuid: payload.order_uuid,
+                status: 'wait',
+                price: 10,
+                currency: 'USD',
+                data: { player_id: '10026' },
+            },
+        });
+        expect(first.body.data.order_id).toMatch(/^ID_[a-f0-9]{16}$/);
+
+        const replay = await rawPost('/client/api/orders', payload, authHeaders(token));
+        expect(replay.status).toBe(200);
+        expect(replay.body.data.order_id).toBe(first.body.data.order_id);
+        expect((await freshUser(reseller._id)).walletBalance).toBe(90);
+        expect(await countTransactions(reseller._id)).toBe(1);
+    });
+
+    test('maps canonical POST validation and order errors to canonical numeric codes', async () => {
+        const { token } = await createApiReseller({ token: 'canonical-post-errors' });
+        const product = await createCompatProduct({ minQty: 2, maxQty: 4, orderFields: [] });
+
+        let response = await rawPost('/client/api/orders', { qty: 2, order_uuid: 'missing-product-id' }, authHeaders(token));
+        expect(response.body.code).toBe(124);
+
+        response = await rawPost('/client/api/orders', { product_id: product.compatProductId, qty: 2 }, authHeaders(token));
+        expect(response.body.code).toBe(124);
+
+        response = await rawPost('/client/api/orders', { product_id: product.compatProductId, qty: 'bad', order_uuid: 'bad-qty' }, authHeaders(token));
+        expect(response.body.code).toBe(106);
+
+        response = await rawPost('/client/api/orders', { product_id: 999999, qty: 1, order_uuid: 'missing-product' }, authHeaders(token));
+        expect(response.body.code).toBe(109);
+
+        response = await rawPost('/client/api/orders', { product_id: product.compatProductId, qty: 1, order_uuid: 'too-small' }, authHeaders(token));
+        expect(response.body.code).toBe(112);
+
+        response = await rawPost('/client/api/orders', { product_id: product.compatProductId, qty: 5, order_uuid: 'too-large' }, authHeaders(token));
+        expect(response.body.code).toBe(113);
+
+        const unavailable = await createCompatProduct({ isActive: false, orderFields: [] });
+        response = await rawPost('/client/api/orders', { product_id: unavailable.compatProductId, qty: 1, order_uuid: 'unavailable' }, authHeaders(token));
+        expect(response.body.code).toBe(110);
+
+        const { token: lowBalanceToken } = await createApiReseller({
+            token: 'canonical-post-low-balance',
+            userOverrides: { walletBalance: 1 },
+        });
+        const expensive = await createCompatProduct({ basePrice: '10', orderFields: [] });
+        response = await rawPost('/client/api/orders', { product_id: expensive.compatProductId, qty: 1, order_uuid: 'insufficient' }, authHeaders(lowBalanceToken));
+        expect(response.body.code).toBe(100);
+    });
+
+    test('blocks compatibility order creation during the existing maintenance mode', async () => {
+        const { token } = await createApiReseller({ token: 'maintenance-token' });
+        const product = await createCompatProduct({ orderFields: [] });
+        await Setting.create({ key: 'maintenanceMode', value: true, description: 'test' });
+
+        const response = await rawPost('/client/api/orders', {
+            product_id: product.compatProductId,
+            qty: 1,
+            order_uuid: 'maintenance-order',
+        }, authHeaders(token));
+        expect(response.status).toBe(503);
+        expect(response.body).toEqual({ status: 'ERROR', code: 130, message: 'Site is under maintenance' });
+    });
     test('creates orders through GET and idempotent retries do not double debit', async () => {
         const { reseller, token } = await createApiReseller({ token: 'order-token' });
         const product = await createCompatProduct({
@@ -661,7 +818,7 @@ describe('Client compatibility API orders', () => {
             authHeaders(token)
         );
         expect(res.status).toBe(400);
-        expect(res.body.code).toBe(123);
+        expect(res.body.code).toBe(124);
 
         res = await rawGet(
             `/client/api/newOrder/${product.compatProductId}/params?qty=nope&order_uuid=bad-qty`,
@@ -739,6 +896,7 @@ describe('Client compatibility API orders', () => {
         expect(byCompat.body.data).toHaveLength(1);
         expect(byCompat.body.data[0]).toEqual(expect.objectContaining({
             order_id: compatOrderId,
+            order_uuid: 'uuid-check-1',
             quantity: 1,
             product_name: 'Check Product',
             status: 'accept',
@@ -753,6 +911,15 @@ describe('Client compatibility API orders', () => {
         expect(byUuid.status).toBe(200);
         expect(byUuid.body.data).toHaveLength(1);
         expect(byUuid.body.data[0].order_id).toBe(compatOrderId);
+        expect(byUuid.body.data[0].order_uuid).toBe('uuid-check-1');
+
+        const byCanonicalUuids = await rawGet(
+            '/client/api/check?uuids=uuid-check-1',
+            authHeaders(token)
+        );
+        expect(byCanonicalUuids.status).toBe(200);
+        expect(byCanonicalUuids.body.data[0].order_id).toBe(compatOrderId);
+        expect(byCanonicalUuids.body.data[0].order_uuid).toBe('uuid-check-1');
 
         const other = await createApiReseller({ token: 'other-check-token' });
         const forbidden = await rawGet(
@@ -764,5 +931,17 @@ describe('Client compatibility API orders', () => {
             status: 'OK',
             data: [],
         });
+    });
+
+    test('maps compatibility statuses and rate-limit errors to the canonical contract', () => {
+        expect(mapStatus(ORDER_STATUS.COMPLETED)).toBe('accept');
+        expect(mapStatus(ORDER_STATUS.PENDING)).toBe('wait');
+        expect(mapStatus(ORDER_STATUS.FAILED)).toBe('reject');
+
+        const json = jest.fn();
+        const status = jest.fn(() => ({ json }));
+        compatRateLimitHandler({}, { status });
+        expect(status).toHaveBeenCalledWith(429);
+        expect(json).toHaveBeenCalledWith({ status: 'ERROR', code: 111, message: 'Try again later' });
     });
 });

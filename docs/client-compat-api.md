@@ -1,34 +1,25 @@
-# Client Compatibility API
+# Canonical B2B API v1
 
-This API mimics common reseller website integrations so clients can switch to Coins Store by changing the base URL and API token.
-
-## Base URLs
-
-Primary:
+The canonical public integration base is:
 
 ```text
-https://coins-stores.com/client/api
+https://your-domain.com/client/api
 ```
 
-Alias:
-
-```text
-https://coins-stores.com/api/client/api
-```
-
-The existing `/api/v1/reseller` and `/api/client` APIs keep their existing response format.
+Each deployment changes only the domain and API token. Numeric product and
+category IDs are compatibility IDs; never use MongoDB IDs in a B2B client.
 
 ## Authentication
 
-Send one of these headers:
+Use the canonical header on every request:
 
 ```http
 api-token: YOUR_API_TOKEN
-x-api-key: YOUR_API_TOKEN
-Authorization: Bearer YOUR_API_TOKEN
 ```
 
-The account must be active, API-enabled, and allowed by any configured IP whitelist.
+`x-api-key` and `Authorization: Bearer YOUR_API_TOKEN` remain accepted legacy
+aliases. The account must be active, API-enabled, non-deleted, and pass any
+configured exact IP whitelist.
 
 ## Profile
 
@@ -36,64 +27,65 @@ The account must be active, API-enabled, and allowed by any configured IP whitel
 GET /profile
 ```
 
-Response:
-
 ```json
 {
-  "balance": "8788.683",
-  "email": "user@email.com"
+  "balance": "150",
+  "email": "user@example.com",
+  "currency": "USD"
 }
 ```
 
-`balance` is the authenticated reseller spendable balance in the user's currency. It is derived from `availableBalance = max(0, walletBalance + creditLimit)` and does not subtract `creditUsed` again.
+`balance` is the spendable balance under the existing wallet and credit rules.
 
 ## Products
 
 ```http
 GET /products
-GET /products?products_id=365,366,367
+GET /products?products_id=1000,1001
 GET /products?base=1
-GET /products?products_id=365,366&base=1
 ```
 
-Full response:
+The regular response includes canonical fields plus legacy aliases:
 
 ```json
-[
-  {
-    "id": 365,
-    "name": "UC 60",
-    "price": 0.104,
-    "params": ["Player ID"],
-    "category_name": "PUBG Global ID UC",
-    "available": true,
-    "qty_values": null,
-    "product_type": "package",
-    "parent_id": 7,
-    "base_price": 0.104,
-    "category_img": "images/category/1710948113.webp"
-  }
-]
+{
+  "id": 1000,
+  "name": "PUBG Mobile UC 60",
+  "price": 1.5,
+  "currency": "USD",
+  "available": true,
+  "product_type": "package",
+  "parent_id": 7,
+  "category_name": "PUBG",
+  "category_img": "uploads/categories/pubg.png",
+  "qty_values": null,
+  "params": ["Player ID"],
+  "fields": [
+    {
+      "key": "player_id",
+      "label": "Player ID",
+      "type": "text",
+      "required": true,
+      "options": []
+    }
+  ],
+  "cost": 1.5,
+  "rate": 1.5,
+  "api_price": 1.5,
+  "provider_price": 1.5,
+  "base_price": 1.5,
+  "original_price": 1.5
+}
 ```
 
-Minimal response with `base=1`:
+`fields` is the canonical structured field list. `params` remains a
+labels-only legacy field. Existing price and min/max aliases remain for legacy
+clients. `qty_values` is `null` for package products or the existing min/max
+range object for range products; fixed quantity arrays are not a supported
+canonical feature.
 
-```json
-[
-  {
-    "id": 365,
-    "name": "UC 60"
-  }
-]
-```
-
-`id` is the stable numeric compatibility product ID. It is not the internal MongoDB ID.
-
-`qty_values` meanings:
-
-- `null`: fixed/package product.
-- `{ "min": "1", "max": "50" }`: amount/range product.
-- `["110", "150"]`: fixed allowed quantities, only when the internal product explicitly supports fixed allowed quantities.
+`base=1` is legacy minimization behavior and retains its existing compact
+response shape.
 
 ## Content
 
@@ -102,165 +94,128 @@ GET /content/0
 GET /content/:parentId
 ```
 
-`parentId` is a stable numeric compatibility category ID. `0` means root content.
+`0` returns root categories and uncategorized products. `parentId` is a numeric
+compatibility category ID. The response remains:
 
-Response:
+```json
+{ "status": "OK", "data": { "categories": [], "products": [] } }
+```
+
+## Create an order
+
+Canonical endpoint:
+
+```http
+POST /orders
+Content-Type: application/json
+```
 
 ```json
 {
-  "status": "OK",
-  "data": {
-    "categories": [
-      {
-        "id": 7,
-        "name": "PUBG Global ID UC",
-        "parent_id": 0,
-        "image": "images/category/1710948113.webp",
-        "available": true
-      }
-    ],
-    "products": [
-      {
-        "id": 365,
-        "name": "UC 60",
-        "price": 0.104,
-        "params": ["Player ID"],
-        "category_name": "PUBG Global ID UC",
-        "available": true,
-        "qty_values": null,
-        "product_type": "package",
-        "parent_id": 7,
-        "base_price": 0.104,
-        "category_img": "images/category/1710948113.webp"
-      }
-    ]
+  "product_id": 1000,
+  "qty": 1,
+  "order_uuid": "client-generated-idempotency-key",
+  "params": {
+    "player_id": "123456789",
+    "server": "EU"
   }
 }
 ```
 
-## New Order
-
-```http
-GET /newOrder/:productId/params?qty=1&playerId=test&server=EU&order_uuid=abc-123
-```
-
-Rules:
-
-- `productId` is the numeric compatibility product ID.
-- `qty` is required and must be valid for the product.
-- `order_uuid` is required and is used as the internal idempotency key.
-- All query params except `qty` and `order_uuid` become order field values.
-- Repeating the same `order_uuid` for the same reseller returns the original order and does not debit again.
-- This endpoint returns `Cache-Control: no-store`.
-
-Success response:
-
 ```json
 {
   "status": "OK",
   "data": {
-    "order_id": "ID_9fffb0d849a45215",
+    "order_id": "ID_0123456789abcdef",
+    "order_uuid": "client-generated-idempotency-key",
     "status": "wait",
-    "price": 1.26048,
-    "data": {
-      "playerId": "test",
-      "server": "EU"
-    },
+    "price": 1.5,
+    "currency": "USD",
+    "data": { "player_id": "123456789", "server": "EU" },
     "replay_api": null
   }
 }
 ```
 
-## Check Orders
+The server resolves the product, validates fields and quantity, calculates the
+price, debits the wallet, creates the order, and dispatches provider fulfillment
+using the existing order service. Client-supplied price or balance values are
+ignored. `order_uuid` maps to the unique `(userId, idempotencyKey)` constraint;
+repeating it returns the original order without another debit.
+
+### Legacy GET order creation
 
 ```http
-GET /check?orders=[ID_1,ID_2]
+GET /newOrder/:productId/params?qty=1&playerId=123&order_uuid=uuid-1
+```
+
+This endpoint remains permanently supported for legacy clients. New clients
+should use POST `/orders`.
+
+## Check orders
+
+```http
 GET /check?orders=ID_1,ID_2
-GET /check?orders=[uuid1,uuid2]&uuid=1
+GET /check?orders=uuid-1,uuid-2&uuid=1
+GET /check?uuids=uuid-1,uuid-2
 ```
 
-Rules:
+Only orders owned by the authenticated account are returned. `uuid=1` remains
+the legacy UUID lookup; `uuids` is the canonical convenience alias.
 
-- Without `uuid=1`, lookup is by compatibility order ID with order number fallback.
-- With `uuid=1`, lookup is by `order_uuid` / idempotency key.
-- Only orders owned by the authenticated reseller are returned.
-- This endpoint returns `Cache-Control: no-store`.
-
-Response:
+Every returned order now also includes its idempotency reference additively:
 
 ```json
 {
-  "status": "OK",
-  "data": [
-    {
-      "order_id": "ID_9fffb0d849a45215",
-      "quantity": 1,
-      "data": {
-        "playerId": "test"
-      },
-      "created_at": "2025-04-10 13:55:48",
-      "product_name": "A-60UC-stock",
-      "price": "1.2604800000000000",
-      "status": "accept",
-      "replay_api": null
-    }
-  ]
+  "order_id": "ID_0123456789abcdef",
+  "order_uuid": "uuid-1",
+  "quantity": 1,
+  "status": "wait"
 }
 ```
 
-## Status Values
+## Status values
 
-- `accept`: completed.
-- `reject`: failed or canceled.
-- `wait`: pending, processing, manual review, or partial.
+| External | Internal |
+| --- | --- |
+| `accept` | `COMPLETED` |
+| `reject` | `FAILED`, `CANCELED` |
+| `wait` | `PENDING`, `PROCESSING`, `MANUAL_REVIEW`, `PARTIAL`, in-flight |
 
-## Error Format
-
-Compatibility endpoints return:
+## Errors
 
 ```json
-{
-  "status": "ERROR",
-  "code": 100,
-  "message": "Insufficient balance"
-}
+{ "status": "ERROR", "code": 100, "message": "Insufficient balance" }
 ```
-
-Codes:
 
 | Code | Meaning |
 | --- | --- |
 | 100 | Insufficient balance |
 | 105 | Quantity not available |
-| 106 | Quantity not allowed |
-| 109 | Product deleted or not found |
-| 110 | Product not available now |
-| 111 | Try again after 1 minute / rate limited |
-| 112 | Quantity is too small |
-| 113 | Quantity is too large |
-| 114 | Unknown order creation error |
-| 120 | API token is required |
-| 121 | Token error |
-| 122 | Not allowed to use API / suspended / API disabled / inactive account |
-| 123 | IP not allowed or validation error |
-| 130 | Site under maintenance, if maintenance mode is enabled |
-| 500 | Unknown internal error |
+| 106 | Invalid quantity |
+| 109 | Product not found |
+| 110 | Product unavailable |
+| 111 | Rate limited |
+| 112 | Quantity too small |
+| 113 | Quantity too large |
+| 114 | Order/business rule error |
+| 120 | API token required |
+| 121 | Invalid API token |
+| 122 | API access disabled or account inactive |
+| 123 | IP not allowed |
+| 124 | Validation error |
+| 130 | Site under maintenance (order creation only) |
+| 500 | Internal server error |
 
-## Backfill
-
-Existing products and categories need numeric compatibility IDs before integrators use product/category IDs.
-
-Run from `Backend`:
+Order creation and order checking send no-store cache headers. The existing
+numeric compatibility-ID backfill remains the recommended deployment step:
 
 ```bash
 node scripts/backfill-compat-ids.js
 ```
 
-The script is idempotent and only assigns IDs to records missing `compatProductId` or `compatCategoryId`.
+## Legacy route families
 
-## Security Notes
-
-- The API reuses reseller API-token authentication.
-- Order creation reuses the existing safe order service, including wallet deduction, idempotency, validation, audit, provider dispatch, refunds, and status lifecycle.
-- Provider tokens, internal cost-only fields, and admin-only fields are not returned.
-- GET-based order creation is supported only for compatibility; clients should always provide a unique `order_uuid`.
+- `/api/client/api/*` is an alias of the compatibility API.
+- `/api/v1/reseller/*` and `/api/client/*` remain separate standard reseller
+  APIs with their existing envelopes and MongoDB-ID order contract.

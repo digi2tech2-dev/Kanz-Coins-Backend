@@ -31,6 +31,22 @@ const apiLimiter = rateLimit({
     },
 });
 
+// Compatibility clients use a numeric error contract. Keep the same limits and
+// headers as the general API limiter, but return their documented response shape.
+const compatRateLimitHandler = (_req, res) => res.status(429).json({
+    status: 'ERROR',
+    code: 111,
+    message: 'Try again later',
+});
+
+const compatApiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 1000,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: compatRateLimitHandler,
+});
+
 // ── Strict Auth Rate Limiter ──────────────────────────────────────────────────
 
 const authLimiter = rateLimit({
@@ -59,4 +75,4 @@ const walletLimiter = rateLimit({
     },
 });
 
-module.exports = { apiLimiter, authLimiter, walletLimiter };
+module.exports = { apiLimiter, compatApiLimiter, compatRateLimitHandler, authLimiter, walletLimiter };

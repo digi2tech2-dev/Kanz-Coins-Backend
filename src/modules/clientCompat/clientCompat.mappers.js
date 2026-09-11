@@ -67,6 +67,23 @@ const mapProductParams = (product = {}) => getActiveFields(product)
     .map((field) => getFieldLabel(field))
     .filter(Boolean);
 
+// params is the historical labels-only shape. fields is the canonical,
+// structured representation used by new integrations.
+const mapProductFields = (product = {}) => getActiveFields(product)
+    .map((field) => {
+        const key = getFieldKey(field);
+        const label = getFieldLabel(field);
+        if (!key || !label) return null;
+        return {
+            key,
+            label,
+            type: String(field.type || 'text'),
+            required: field.required !== false,
+            options: Array.isArray(field.options) ? field.options : [],
+        };
+    })
+    .filter(Boolean);
+
 const mapQuantity = (product = {}) => {
     const rawQuantityList = product.qty_values
         ?? product.qtyValues
@@ -166,6 +183,7 @@ const mapProduct = ({ product, category, price, priceUsd, currency = 'USD', mini
         api_price: priceAliases.api_price,
         provider_price: priceAliases.provider_price,
         params: mapProductParams(product),
+        fields: mapProductFields(product),
         category_name: category?.name || '',
         available: product.isActive !== false && !product.deletedAt,
         qty_values: quantity.qty_values,
@@ -199,14 +217,17 @@ const getOrderPrice = (order = {}) => {
 
 const mapCreatedOrder = (order = {}) => ({
     order_id: order.compatOrderId,
+    order_uuid: order.idempotencyKey || null,
     status: mapStatus(order.status),
     price: toFixedCompatNumber(getOrderPrice(order)),
+    currency: String(order.currency || 'USD').toUpperCase(),
     data: getOrderData(order),
     replay_api: null,
 });
 
 const mapCheckedOrder = (order = {}) => ({
     order_id: order.compatOrderId,
+    order_uuid: order.idempotencyKey || null,
     quantity: Number(order.quantity || 0),
     data: getOrderData(order),
     created_at: formatDateTime(order.createdAt),
@@ -284,6 +305,7 @@ module.exports = {
     getActiveFields,
     getFieldKey,
     getFieldLabel,
+    mapProductFields,
     getCategoryForProduct,
     mapProduct,
     mapCreatedOrder,

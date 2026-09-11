@@ -55,6 +55,7 @@ const getProfile = async (reseller) => {
     return {
         balance: toBalanceString(walletSummary.availableBalance),
         email: reseller.email || null,
+        currency: walletSummary.currency,
     };
 };
 
@@ -359,9 +360,16 @@ const populateOrderForCompat = async (orderId) => Order.findById(orderId)
     .populate('productId', 'name')
     .lean();
 
-const placeOrder = async (reseller, compatProductId, query, auditContext) => {
+const createCompatOrder = async ({
+    reseller,
+    compatProductId,
+    qty,
+    orderUuid,
+    fields,
+    auditContext,
+}) => {
     const product = await findProductByCompatId(compatProductId);
-    const quantity = Number(query.qty);
+    const quantity = Number(qty);
     if (!Number.isInteger(quantity) || quantity <= 0) {
         throw new ClientCompatError('Quantity not allowed', ERROR_CODES.QUANTITY_NOT_ALLOWED, 400);
     }
@@ -372,14 +380,14 @@ const placeOrder = async (reseller, compatProductId, query, auditContext) => {
         throw new ClientCompatError('Quantity is too large', ERROR_CODES.QUANTITY_TOO_LARGE, 400);
     }
 
-    const idempotencyKey = String(query.order_uuid || '').trim();
+    const idempotencyKey = String(orderUuid || '').trim();
     if (!idempotencyKey) {
         throw new ClientCompatError('order_uuid is required', ERROR_CODES.VALIDATION, 400);
     }
 
     const orderFieldsValues = normalizeOrderFieldsForProduct(
         product,
-        extractOrderFieldsFromQuery(query)
+        fields
     );
 
     const { order } = await orderService.createOrder({
@@ -397,6 +405,35 @@ const placeOrder = async (reseller, compatProductId, query, auditContext) => {
         status: 'OK',
         data: mapCreatedOrder(freshOrder),
     };
+};
+
+const placeOrder = async (reseller, compatProductId, query, auditContext) => createCompatOrder({
+    reseller,
+    compatProductId,
+    qty: query.qty,
+    orderUuid: query.order_uuid,
+    fields: extractOrderFieldsFromQuery(query),
+    auditContext,
+});
+
+const placeCanonicalOrder = async (reseller, body, auditContext) => {
+    if (body?.product_id === undefined || body?.product_id === null || String(body.product_id).trim() === '') {
+        throw new ClientCompatError('product_id is required', ERROR_CODES.VALIDATION, 400);
+    }
+
+    const params = body?.params;
+    if (params !== undefined && (!params || typeof params !== 'object' || Array.isArray(params))) {
+        throw new ClientCompatError('params must be an object', ERROR_CODES.VALIDATION, 400);
+    }
+
+    return createCompatOrder({
+        reseller,
+        compatProductId: body?.product_id,
+        qty: body?.qty,
+        orderUuid: body?.order_uuid,
+        fields: params || {},
+        auditContext,
+    });
 };
 
 const listOrders = async (reseller, ids, { byUuid = false } = {}) => {
@@ -446,6 +483,7 @@ module.exports = {
     listProducts,
     getContent,
     placeOrder,
+    placeCanonicalOrder,
     listOrders,
     ensureProductCompatId,
     ensureCategoryCompatId,

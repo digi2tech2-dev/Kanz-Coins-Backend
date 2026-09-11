@@ -20,7 +20,9 @@ const ERROR_CODES = Object.freeze({
     QUANTITY_TOO_SMALL: 112,
     QUANTITY_TOO_LARGE: 113,
     ORDER_CREATE_UNKNOWN: 114,
-    VALIDATION: 123,
+    IP_FORBIDDEN: 123,
+    VALIDATION: 124,
+    MAINTENANCE: 130,
     INTERNAL: 500,
 });
 
@@ -52,12 +54,16 @@ const mapErrorToCompat = (err) => {
         return { statusCode: 400, code: ERROR_CODES.QUANTITY_NOT_ALLOWED, message: 'Quantity not allowed' };
     }
 
+    if (internalCode === 'QUANTITY_NOT_AVAILABLE') {
+        return { statusCode: 400, code: ERROR_CODES.QUANTITY_NOT_AVAILABLE, message: 'Quantity not available' };
+    }
+
     if (internalCode === 'INVALID_ORDER_FIELDS') {
         return { statusCode: 400, code: ERROR_CODES.VALIDATION, message };
     }
 
     if (internalCode === 'RATE_LIMIT_EXCEEDED') {
-        return { statusCode: 429, code: ERROR_CODES.RATE_LIMITED, message: 'Try again after 1 minute' };
+        return { statusCode: 429, code: ERROR_CODES.RATE_LIMITED, message: 'Try again later' };
     }
 
     return {

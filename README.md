@@ -484,8 +484,8 @@ Route groups mounted in `src/app.js`:
 | `/api/providers` | Providers | Provider CRUD, sync, provider products, provider-product publishing | JWT `ADMIN`/`SUPERVISOR` with `MANAGE_SUPPLIERS` |
 | `/api/v1/reseller` | Reseller API | Balance, products, create order, lookup by idempotency key | API token through `api-token`, `x-api-key`, or Bearer |
 | `/api/client` | Reseller alias | Alias to reseller API | API token |
-| `/api/client/api` | Client compat | Legacy-compatible profile/products/content/newOrder/check | API token, legacy error shape |
-| `/client/api` | Client compat alias | Same client-compatible routes outside `/api` | API token, legacy error shape |
+| `/api/client/api` | Client compat alias | Alias of canonical compatibility profile/products/content/orders/check | API token, compatibility error shape |
+| `/client/api` | Canonical B2B API v1 | Profile, products, content, POST orders, legacy GET newOrder, check | `api-token` (legacy aliases accepted), compatibility error shape |
 | `/api/me` | Customer panel | Profile, API token/settings, wallet, products, orders, deposits, order-field image upload | JWT active user |
 | `/api/me/targets` | Target requests | Active target apps and customer target orders | JWT active user |
 | `/api/me/notifications` | Notifications | Customer inbox/read/unread routes | JWT active user |
@@ -854,7 +854,7 @@ Client compatibility routes intentionally return a legacy shape:
 | `docs/admin-panel.md` | Admin panel API and operational notes. |
 | `docs/api-reference.md` | Detailed API examples and endpoint notes. May lag behind newer route additions. |
 | `docs/architecture.md` | Architectural overview and module responsibilities. |
-| `docs/client-compat-api.md` | Reseller/client-compatible API details and error codes. |
+| `docs/client-compat-api.md` | Canonical B2B compatibility contract, legacy aliases, and error codes. |
 | `docs/database-schema.md` | Model fields, indexes, and relationships. |
 | `docs/dynamic-order-fields.md` | Dynamic product order fields and provider mapping. |
 | `docs/order-system.md` | Order lifecycle and fulfillment notes. |

@@ -10,7 +10,7 @@ const morgan = require('morgan');
 const config = require('./config/config');
 const globalErrorHandler = require('./shared/errors/errorHandler');
 const { AppError } = require('./shared/errors/AppError');
-const { apiLimiter } = require('./shared/middlewares/rateLimiter');
+const { apiLimiter, compatApiLimiter } = require('./shared/middlewares/rateLimiter');
 
 // ── Module Routers ────────────────────────────────────────────────────────────
 const authRoutes = require('./modules/auth/auth.routes');
@@ -106,10 +106,14 @@ app.get('/health', (req, res) => {
 // ── API Routes ────────────────────────────────────────────────────────────────
 const API_PREFIX = '/api';
 
-// Apply general rate limiter to all API routes (500 req / 15 min per IP)
-app.use(API_PREFIX, apiLimiter);
+// Apply the general limiter to all API routes except the compatibility alias,
+// which has the same limits but its own documented numeric error envelope.
+app.use(API_PREFIX, (req, res, next) => {
+    if (req.path === '/client/api' || req.path.startsWith('/client/api/')) return next();
+    return apiLimiter(req, res, next);
+});
 
-app.use('/client/api', apiLimiter, clientCompatRoutes);
+app.use('/client/api', compatApiLimiter, clientCompatRoutes);
 
 app.use(`${API_PREFIX}/auth`, authRoutes);
 app.use(`${API_PREFIX}/users`, userRoutes);
@@ -121,7 +125,7 @@ app.use(`${API_PREFIX}/audit`, auditRoutes);
 app.use(`${API_PREFIX}/deposits`, depositRoutes);
 app.use(`${API_PREFIX}/providers`, providerRoutes);
 app.use(`${API_PREFIX}/v1/reseller`, resellerRoutes);
-app.use(`${API_PREFIX}/client/api`, clientCompatRoutes);
+app.use(`${API_PREFIX}/client/api`, compatApiLimiter, clientCompatRoutes);
 app.use(`${API_PREFIX}/client`, resellerRoutes);
 
 // ── User Panel ─────────────────────────────────────────────────────────────────

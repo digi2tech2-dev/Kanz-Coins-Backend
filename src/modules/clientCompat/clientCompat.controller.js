@@ -38,11 +38,22 @@ const placeOrder = async (req, res) => {
     res.json(payload);
 };
 
+const placeCanonicalOrder = async (req, res) => {
+    setNoStore(res);
+    const payload = await clientCompatService.placeCanonicalOrder(
+        req.reseller,
+        req.body || {},
+        req.auditContext
+    );
+    res.json(payload);
+};
+
 const checkOrders = async (req, res) => {
     setNoStore(res);
-    const ids = parseOrdersQuery(req.query.orders);
+    const canonicalUuids = req.query.uuids;
+    const ids = parseOrdersQuery(canonicalUuids || req.query.orders);
     const payload = await clientCompatService.listOrders(req.reseller, ids, {
-        byUuid: String(req.query.uuid || '') === '1',
+        byUuid: canonicalUuids !== undefined || String(req.query.uuid || '') === '1',
     });
     res.json(payload);
 };
@@ -52,5 +63,6 @@ module.exports = {
     listProducts,
     getContent,
     placeOrder,
+    placeCanonicalOrder,
     checkOrders,
 };
