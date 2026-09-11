@@ -34,9 +34,10 @@ const whatsappRoutes = require('./modules/whatsapp/whatsapp.routes');
 const resellerRoutes = require('./modules/reseller/reseller.routes');
 const clientCompatRoutes = require('./modules/clientCompat/clientCompat.routes');
 const uploadRoutes = require('./shared/routes/upload.routes');
+const { startDefaultSettingsSeed } = require('./shared/startup/defaultSettingsSeed');
 const path = require('path');
-// Seed default settings on startup (idempotent, no-op if already seeded)
-require('./modules/admin/setting.model').seedDefaultSettings().catch(() => { });
+// Seed default settings on startup unless explicitly in safe local production mode.
+startDefaultSettingsSeed();
 
 
 const app = express();

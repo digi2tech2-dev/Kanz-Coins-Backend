@@ -54,7 +54,7 @@ const _getTransporter = () => {
  */
 const sendEmail = async ({ to, subject, html, text }) => {
     // No-op in tests — avoids real SMTP calls and keeps tests fast
-    if (config.env === 'test') return;
+    if (config.env === 'test' || config.safeLocalProductionMode) return;
 
     const transporter = _getTransporter();
 

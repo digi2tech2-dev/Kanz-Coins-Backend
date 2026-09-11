@@ -10,13 +10,20 @@ const syncProvidersJob = require('./modules/providers/syncProvidersJob');
 const whatsappService = require('./modules/whatsapp/whatsapp.service');
 
 
-const startServer = async () => {
+const startServer = async ({
+    appInstance = app,
+    connectDatabase = connectDB,
+    fulfillment = fulfillmentJob,
+    providerSync = syncProvidersJob,
+    whatsapp = whatsappService,
+    registerProcessHandlers = true,
+} = {}) => {
     try {
         // 1. Connect to MongoDB first
-        await connectDB();
+        await connectDatabase();
 
         // 2. Then start listening
-        const server = app.listen(config.port, () => {
+        const server = appInstance.listen(config.port, () => {
             console.log('');
             console.log('═══════════════════════════════════════════════════════');
             console.log(`  🚀  Coins Store`);
@@ -27,21 +34,32 @@ const startServer = async () => {
             console.log('');
         });
 
-        // 3. Start background cron jobs (skipped in test env)
-        fulfillmentJob.start();    // every minute  — polls PROCESSING order statuses
-        syncProvidersJob.start();  // every 6 hours — syncs provider product catalogues
-        whatsappService.initializeWhatsAppClient().catch((err) => {
-            console.error('[WhatsApp] startup initialization failed:', err.message);
-        });
+        // 3. Start background integrations unless this is controlled local
+        // inspection against a remote/production-like database.
+        if (config.safeLocalProductionMode) {
+            console.warn('');
+            console.warn('====================================================');
+            console.warn('SAFE LOCAL PRODUCTION MODE ENABLED');
+            console.warn('Background jobs, startup seeding, WhatsApp initialization,');
+            console.warn('and outbound notifications are disabled.');
+            console.warn('====================================================');
+            console.warn('');
+        } else {
+            fulfillment.start();
+            providerSync.start();
+            whatsapp.initializeWhatsAppClient().catch((err) => {
+                console.error('[WhatsApp] startup initialization failed:', err.message);
+            });
+        }
 
         // ── Graceful Shutdown ─────────────────────────────────────────────────────
         const gracefulShutdown = (signal) => {
             console.log(`\n⚠️  Received ${signal}. Shutting down gracefully...`);
 
             // Stop both cron jobs before closing HTTP
-            fulfillmentJob.stop();
-            syncProvidersJob.stop();
-            whatsappService.destroyWhatsAppClient().catch((err) => {
+            fulfillment.stop();
+            providerSync.stop();
+            whatsapp.destroyWhatsAppClient().catch((err) => {
                 console.warn('[WhatsApp] shutdown cleanup failed:', err.message);
             });
 
@@ -60,19 +78,21 @@ const startServer = async () => {
             }, 10_000);
         };
 
-        process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-        process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+        if (registerProcessHandlers) {
+            process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+            process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-        // ── Unhandled Rejections / Exceptions ─────────────────────────────────────
-        process.on('unhandledRejection', (reason) => {
-            console.error('💥 Unhandled Promise Rejection:', reason);
-            gracefulShutdown('unhandledRejection');
-        });
+            // ── Unhandled Rejections / Exceptions ─────────────────────────────────
+            process.on('unhandledRejection', (reason) => {
+                console.error('💥 Unhandled Promise Rejection:', reason);
+                gracefulShutdown('unhandledRejection');
+            });
 
-        process.on('uncaughtException', (error) => {
-            console.error('💥 Uncaught Exception:', error);
-            process.exit(1);
-        });
+            process.on('uncaughtException', (error) => {
+                console.error('💥 Uncaught Exception:', error);
+                process.exit(1);
+            });
+        }
 
         return server;
     } catch (error) {
@@ -81,4 +101,8 @@ const startServer = async () => {
     }
 };
 
-startServer();
+if (require.main === module) {
+    startServer();
+}
+
+module.exports = { startServer };
