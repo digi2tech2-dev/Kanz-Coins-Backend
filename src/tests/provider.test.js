@@ -133,6 +133,25 @@ describe('[1] Provider Model', () => {
         expect(p.syncInterval).toBe(60);
     });
 
+    it('keeps adapterType optional and normalizes canonical-b2b when provided', async () => {
+        const legacy = await makeProvider();
+        const canonical = await makeProvider({ adapterType: ' CANONICAL-B2B ' });
+        expect(legacy.adapterType).toBeNull();
+        expect(canonical.adapterType).toBe('canonical-b2b');
+    });
+
+    it('persists adapterType through the existing provider create/update service', async () => {
+        const created = await providerService.createProvider({
+            name: 'Service Canonical Provider',
+            baseUrl: 'https://service.example/client/api',
+            apiToken: 'test-token',
+            adapterType: 'canonical-b2b',
+        });
+        const updated = await providerService.updateProvider(created._id, { adapterType: ' CANONICAL-B2B ' });
+        expect(created.adapterType).toBe('canonical-b2b');
+        expect(updated.adapterType).toBe('canonical-b2b');
+    });
+
     it('rejects when name is missing', async () => {
         await expect(
             Provider.create({ baseUrl: 'https://example.com' })

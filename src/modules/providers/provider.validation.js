@@ -47,6 +47,11 @@ const createProviderValidation = [
         .isString().trim().toLowerCase()
         .matches(/^[a-z0-9-]+$/).withMessage('slug must be lowercase alphanumeric with hyphens'),
 
+    body('adapterType')
+        .optional({ nullable: true })
+        .isString().trim().toLowerCase()
+        .isLength({ max: 64 }),
+
     body('baseUrl')
         .notEmpty().withMessage('baseUrl is required')
         .isURL().withMessage('baseUrl must be a valid URL'),
@@ -82,6 +87,11 @@ const updateProviderValidation = [
         .optional()
         .isString().trim().toLowerCase()
         .matches(/^[a-z0-9-]+$/).withMessage('slug must be lowercase alphanumeric with hyphens'),
+
+    body('adapterType')
+        .optional({ nullable: true })
+        .isString().trim().toLowerCase()
+        .isLength({ max: 64 }),
 
     body('baseUrl')
         .optional().isURL(),

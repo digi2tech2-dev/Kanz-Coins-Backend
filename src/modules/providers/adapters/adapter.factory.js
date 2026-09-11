@@ -6,8 +6,9 @@
  * Resolves the correct provider adapter for a given Provider document.
  *
  * ─── Lookup priority ──────────────────────────────────────────────────────────
- * 1. provider.slug   (preferred — URL-safe, e.g. "royal-crown")
- * 2. provider.name   (lowercased, trimmed  — e.g. "royal crown" → found via "royal crown")
+ * 1. provider.adapterType (explicit shared adapter key)
+ * 2. provider.slug   (preferred legacy key — URL-safe, e.g. "royal-crown")
+ * 3. provider.name   (lowercased, trimmed  — e.g. "royal crown" → found via "royal crown")
  *
  * Falls back to MockProviderAdapter if no match is found, which is
  * appropriate for development and test environments.
@@ -35,6 +36,7 @@ const { TorosfonAdapter } = require('./toros.adapter');
 const { AlkasrVipAdapter } = require('./alkasr.adapter');
 const { IbraAdapter } = require('./ibra.adapter');
 const { DealerApiAdapter } = require('./dealerApi.service');
+const { CanonicalB2BAdapter } = require('./canonicalB2B.adapter');
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 //
@@ -42,6 +44,8 @@ const { DealerApiAdapter } = require('./dealerApi.service');
 // so the lookup works regardless of whether provider.slug is set.
 //
 const registry = new Map([
+    // ── Canonical B2B API v1 ─────────────────────────────────────────────────
+    ['canonical-b2b', CanonicalB2BAdapter],
     // ── Royal Crown ──────────────────────────────────────────────────────────
     ['royal-crown', RoyalCrownAdapter],   // slug
     ['royal crown', RoyalCrownAdapter],   // name (lowercase)
@@ -131,8 +135,9 @@ const registry = new Map([
  * Get an adapter instance for the given provider document.
  *
  * Lookup order:
- *   1. provider.slug  (exact match, lowercase)
- *   2. provider.name  (lowercase, trimmed)
+ *   1. provider.adapterType (explicit shared adapter key)
+ *   2. provider.slug  (exact match, lowercase)
+ *   3. provider.name  (lowercase, trimmed)
  *   3. Fallback → MockProviderAdapter
  *
  * @param {Object} provider          - Provider Mongoose document
@@ -141,10 +146,12 @@ const registry = new Map([
  * @returns {BaseProviderAdapter}
  */
 const getAdapter = (provider, adapterOptions = {}) => {
+    const byAdapterType = (provider.adapterType ?? '').toLowerCase().trim();
     const bySlug = (provider.slug ?? '').toLowerCase().trim();
     const byName = (provider.name ?? '').toLowerCase().trim();
 
-    const AdapterClass = registry.get(bySlug)
+    const AdapterClass = registry.get(byAdapterType)
+        ?? registry.get(bySlug)
         ?? registry.get(byName)
         ?? MockProviderAdapter;
 
@@ -163,15 +170,16 @@ const getAdapter = (provider, adapterOptions = {}) => {
  * @returns {BaseProviderAdapter}
  */
 const getProviderAdapter = (provider, options = {}) => {
+    const byAdapterType = (provider.adapterType ?? '').toLowerCase().trim();
     const bySlug = (provider.slug ?? '').toLowerCase().trim();
     const byName = (provider.name ?? '').toLowerCase().trim();
 
-    const AdapterClass = registry.get(bySlug) ?? registry.get(byName);
+    const AdapterClass = registry.get(byAdapterType) ?? registry.get(bySlug) ?? registry.get(byName);
 
     if (!AdapterClass) {
         if (options.strict) {
             throw new Error(
-                `UNSUPPORTED_PROVIDER: No adapter registered for slug="${bySlug}" / name="${byName}".`
+                `UNSUPPORTED_PROVIDER: No adapter registered for adapterType="${byAdapterType}" / slug="${bySlug}" / name="${byName}".`
             );
         }
         return new MockProviderAdapter(provider, options);

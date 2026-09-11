@@ -1,375 +1,255 @@
 # Provider Integration
 
-## Overview
+## Scope
 
-The provider layer bridges the platform with external digital-goods supplier APIs. Three production providers are integrated: **Royal Crown**, **Torosfon Store**, and **Alkasr VIP**. A **MockProviderAdapter** serves as a safe fallback for development and testing.
+This document describes the current implementation in `src/modules/providers`
+and `src/modules/orders`. It is not a provider API specification.
 
----
-
-## Architecture: Three Layers
-
-```
-Layer 1 ─ Provider document
-           (DB record: name, slug, baseUrl, apiToken, syncInterval)
-           ↓
-Layer 2 ─ ProviderProduct document
-           (raw synced catalogue: externalProductId, rawName, rawPrice)
-           ↓
-Layer 3 ─ Product document
-           (admin-curated: name, basePrice, orderFields, providerMapping)
+```text
+Provider → ProviderProduct (raw external catalogue) → Product (admin-curated)
 ```
 
-Customers only ever see Layer 3. Layer 2 is admin-only. Layer 1 is system configuration.
-
----
+`ProviderProduct` stores normalized external catalogue data. `Product` owns
+public fields, `orderFields`, and `providerMapping`.
 
 ## Adapter Factory
 
 **File:** `src/modules/providers/adapters/adapter.factory.js`
 
-The factory resolves the correct adapter class for a given Provider document.
+The factory lowercases and trims values, then resolves in this order:
 
-### Resolution Order
+1. `provider.adapterType`
+2. `provider.slug`
+3. `provider.name`
+4. `MockProviderAdapter` in non-strict mode
 
-1. **`provider.slug`** (preferred) — lowercase, URL-safe, e.g. `"royal-crown"`
-2. **`provider.name`** (fallback) — lowercased and trimmed, e.g. `"royal crown"`
-3. **`MockProviderAdapter`** — if no match (non-strict mode) or **throws** `UNSUPPORTED_PROVIDER` (strict mode)
+`adapterType` is optional. `getAdapter()` always falls back to Mock.
+`getProviderAdapter(provider, { strict: true })` throws `UNSUPPORTED_PROVIDER`
+only when no adapterType, slug, or name matches. An unknown adapterType still
+falls through to a matching legacy slug or name.
 
-### Registry
-
-| Key(s) | Adapter |
-|--------|---------|
+| Registry keys | Adapter |
+| --- | --- |
+| `canonical-b2b` | `CanonicalB2BAdapter` |
 | `royal-crown`, `royal crown`, `royalcrown` | `RoyalCrownAdapter` |
-| `toros`, `torosfon`, `torosfon store`, `toros-store` | `TorosfonAdapter` |
-| `alkasr`, `alkasr-vip`, `alkasr vip`, `alkasrvip` | `AlkasrVipAdapter` |
+| `toros`, `torosfon`, `torosfon store`, `toros-store`, `torosfonstore` | `TorosfonAdapter` |
+| `alkasr`, `alkasr-vip`, `alkasr vip`, `alkasrvip` and configured brand aliases | `AlkasrVipAdapter` |
+| `ibra-store`, `ibrastore`, `ibra` | `IbraAdapter` |
+| `dealer-api`, `dealer`, `karak`, `ibulala` and configured aliases | `DealerApiAdapter` |
 | `mock` | `MockProviderAdapter` |
 
-### Usage
+Multiple Provider records can use `adapterType: "canonical-b2b"` with different
+`baseUrl` and token values.
 
-```js
-const { getProviderAdapter } = require('./adapter.factory');
-
-// Normal (falls back to mock on unknown slug)
-const adapter = getProviderAdapter(providerDocument);
-
-// Strict (throws if unknown)
-const adapter = getProviderAdapter(providerDocument, { strict: true });
-
-// Register a new adapter at runtime (e.g., in tests / plugins)
-const { registerAdapter } = require('./adapter.factory');
-registerAdapter('my-provider', MyCustomAdapter);
-```
-
----
-
-## Base Adapter Interface
+## Base Adapter Contract
 
 **File:** `src/modules/providers/adapters/base.adapter.js`
 
-All adapters extend `BaseProviderAdapter`. The contract methods are:
+Concrete adapters implement `getProducts()`, `placeOrder(params)`,
+`checkOrder(orderId)`, `checkOrders(orderIds)`, and `getBalance()`.
 
-| Method | Signature | Returns |
-|--------|-----------|---------|
-| `getProducts()` | `async ()` | `Array<{ externalProductId, name, price, minQty, maxQty, isActive }>` |
-| `placeOrder(params)` | `async ({ externalProductId, quantity, ...fields })` | Provider order object |
-| `getOrderStatus(providerOrderId)` | `async (id)` | `{ status, rawResponse }` |
-| `checkOrders(orderIds)` | `async (ids[])` | Array of `{ id, status, rawResponse }` |
-| `getBalance()` | `async ()` | `{ balance, currency }` |
+Base aliases are `fetchProducts()` → `getProducts()`,
+`checkOrdersBatch()` → `checkOrders()`, and `getMyInfo()` → `getBalance()`.
 
-All methods must be implemented by concrete adapters. `BaseProviderAdapter` provides `_validateDTO()` for input sanitation and common error handling.
+Products supplied to synchronization have this normalized shape:
 
----
-
-## Implemented Adapters
-
-### RoyalCrownAdapter
-
-**Endpoint base:** `https://royal-croown.com`
-**Authentication:** Query parameter `?token=<apiToken>`
-
-| Operation | HTTP |
-|-----------|------|
-| `getProducts()` | `GET /api/services` |
-| `placeOrder()` | `POST /api/add` |
-| `getOrderStatus()` | `POST /api/status` |
-| `checkOrders()` | `POST /api/status` (batch) |
-| `getBalance()` | `GET /api/account/balance` (if supported) |
-
----
-
-### TorosfonAdapter
-
-**Endpoint base:** `https://torosfon.com`
-**Authentication:** `Authorization: Bearer <apiToken>` header
-
-| Operation | HTTP |
-|-----------|------|
-| `getProducts()` | `GET /api/services` |
-| `placeOrder()` | `POST /api/add` |
-| `getOrderStatus()` | `GET /api/status?order=<id>` |
-| `checkOrders()` | Batch status endpoint |
-| `getBalance()` | `GET /api/account/balance` |
-
----
-
-### AlkasrVipAdapter
-
-**Endpoint base:** `https://alkasr-vip.com`
-**Authentication:** `X-API-Key: <apiToken>` header
-
-| Operation | HTTP |
-|-----------|------|
-| `getProducts()` | `GET /v1/products` |
-| `placeOrder()` | `POST /v1/orders` |
-| `getOrderStatus()` | `GET /v1/orders/<id>` |
-| `checkOrders()` | `POST /v1/orders/batch-status` |
-| `getBalance()` | `GET /account/info` |
-
----
-
-### MockProviderAdapter
-
-A fully functional adapter that simulates all API operations without making network calls. Used in:
-- Test environment (default fallback)
-- Development against unknown providers
-- Unit tests with injected mock behavior
-
----
-
-## Provider Sync Engine
-
-**File:** `src/modules/providers/providerCatalog.service.js`
-
-### Sync Flow
-
-```
-syncProvidersJob runs every 6 hours
-    │
-    ▼
-For each active Provider:
-    getProviderAdapter(provider)
-    adapter.getProducts()
-    │
-    ▼
-For each product in response:
-    ProviderProduct.findOneAndUpdate(
-        { provider, externalProductId },
-        { rawName, rawPrice, rawPayload, isActive, lastSyncedAt },
-        { upsert: true }
-    )
-```
-
-**Design principles:**
-- Idempotent — safe to run multiple times (upsert prevents duplicates)
-- Non-destructive — `translatedName` (set by admin) is never overwritten
-- Per-provider isolation — sync failure on one provider does not affect others
-
-### Triggering Manual Sync
-
-```http
-POST /api/admin/catalog/sync
--- or --
-POST /api/admin/catalog/sync/:providerId
-```
-
-### Viewing Raw Products After Sync
-
-```http
-GET /api/admin/provider-products/:providerId
-```
-
-Returns the full `ProviderProduct` collection for that provider, including `rawPayload`, so admins can inspect the raw data before publishing.
-
----
-
-## Provider Mapping (providerMapping)
-
-### The Problem
-
-The platform uses human-readable keys in `orderFields` (e.g. `player_id`, `server`). Provider APIs expect their own parameter names (e.g. `link`, `server_id`). Hardcoding this translation in adapter code would couple adapters to specific product forms.
-
-### The Solution
-
-Each `Product` carries a `providerMapping: Map<String, String>`:
-
-```json
+```js
 {
-  "providerMapping": {
-    "player_id": "link",
-    "server": "server_id",
-    "amount": "quantity"
-  }
+  externalProductId: String,
+  rawName: String,
+  rawPrice: String,
+  minQty: Number,       // default 1
+  maxQty: Number,       // default 9999
+  isActive: Boolean,    // default true
+  rawPayload: Object
 }
 ```
 
-### Translation at Fulfillment Time
+`_resolveToken()` prefers `apiToken`, then `apiKey`, then `effectiveToken`.
 
-**File:** `src/modules/orders/orderFulfillment.service.js`
+## Current Adapters
+
+HTTP adapters use Axios with a default 180,000 ms timeout unless an option
+overrides it.
+
+| Adapter | Authentication in current code | Products / balance | Placement / status |
+| --- | --- | --- | --- |
+| RoyalCrownAdapter | `api-token` header | `GET /api/AllProducts`; `GET /api/GetMyInfo` | `GET /api/PlaceOrder/:productId/data`; `GET /api/CheckOrder?order_id=`; `GET /api/CheckListOrders?orders=` |
+| TorosfonAdapter | `api-token` header | `GET /api/AllProducts`; `GET /api/GetMyInfo` | `GET /api/PlaceOrder/:productId/data`; `GET /api/CheckOrder?order_id=`; `GET /api/CheckListOrders?orders=` |
+| AlkasrVipAdapter | `api-token` header | `GET /client/api/products`; `GET /client/api/profile` | `GET /client/api/newOrder/:productId/params`; `GET /client/api/check?orders=` |
+| IbraAdapter | `api-token` header | `GET /client/products`; `GET /client/profile` | `POST /client/orders`; `GET /client/check?orders=` |
+| DealerApiAdapter | `secretKey` query parameter; no auth header set by this adapter | dynamic local catalogue; `GET /dealer/account?secretKey=` | `POST /dealer/sale` with `secretKey`, `toUserId`, `coins`; checks return synthetic completed results |
+| CanonicalB2BAdapter | `api-token` header | `GET /products`; `GET /profile` | `POST /orders`; `GET /check?orders=`; `GET /check?uuids=` |
+| MockProviderAdapter | none | local mock data | local mock behavior |
+
+- Royal Crown and Toros placement sends `amount`, `player_Id`, and
+  `referenceId` query fields. Toros normalizes statuses before returning them.
+- Alkasr uses the legacy GET creation endpoint and creates its own
+  `crypto.randomUUID()` as `order_uuid`; it does not forward `referenceId`.
+- Ibra posts `{ productId, qty, order_uuid, ...dynamicFields }`; it uses a
+  supplied `referenceId`, but generates a UUID if none is supplied.
+- Dealer dynamic products are configured locally for `karak` and `ibulala`.
+  Its check methods do not call a remote status endpoint.
+
+## CanonicalB2BAdapter
+
+**File:** `src/modules/providers/adapters/canonicalB2B.adapter.js`
+
+Example Provider configuration:
+
+```text
+adapterType=canonical-b2b
+baseUrl=https://domain.example/client/api
+apiToken=<site-specific-token>
+```
+
+`baseUrl` is the complete Canonical B2B API base. The adapter removes only
+trailing slashes and never appends `/client/api`.
+
+`GET /products` maps upstream `id`, `name`, `price`, `available`, and
+`qty_values` into the base DTO. A numeric `{ min, max }` object maps to a range;
+any other quantity form, including `null`, maps to `minQty: 1, maxQty: 1`.
+
+The provider-price pipeline treats raw provider prices as USD. An explicit
+non-USD upstream currency makes `getProducts()` throw. Missing currency uses
+the current USD-compatible behavior. Upstream `fields` remain in sanitized
+`rawPayload`; this adapter does not publish local `Product.orderFields` or alter
+`providerMapping`.
+
+### Placement and uncertain recovery
+
+`executeOrder()` passes the persisted `Order.orderNumber` as `referenceId`.
+CanonicalB2BAdapter requires a positive numeric external product ID and that
+reference, then sends:
+
+```json
+{
+  "product_id": 1000,
+  "qty": 1,
+  "order_uuid": "<Order.orderNumber>",
+  "params": { "...mapped customer fields": "..." }
+}
+```
+
+It removes recognized internal price, balance, and currency fields before
+building `params`, and never generates a substitute reference. A normal
+`{ status: "OK", data: { order_id, status } }` response returns the real remote
+ID as `providerOrderId` and preserves the raw status for the central mapper.
+Deterministic compatibility errors and HTTP 4xx responses return failed
+placement results.
+
+Timeouts, resets, network interruptions, and eligible unknown 5xx placement
+errors trigger `GET /check?uuids=<Order.orderNumber>`:
+
+- A match returns the actual remote `order_id` and status.
+- No match, or a failed reference lookup, returns `success: true` with
+  `providerStatus: "PLACEMENT_UNCERTAIN"` and no remote ID.
+
+Adapter raw values with token, API-key, authorization, password, or secret keys
+are redacted.
+
+## Product Synchronization
+
+**Scheduled job:** `src/modules/providers/syncProvidersJob.js`
+**Actual sync implementation:** `src/modules/providers/providerProductSync.service.js`
+
+`server.js` starts `syncProvidersJob` unless safe local production mode is
+enabled. The job does not start in tests. Its default schedule is:
+
+```text
+0 0,6,12,18 * * *
+```
+
+That runs at 00:00, 06:00, 12:00, and 18:00 UTC. The job calls
+`syncAllProviders()` from `providerCatalog.service.js`, which re-exports the
+implementation in `providerProductSync.service.js`.
+
+For each active Provider, synchronization:
+
+1. Resolves an adapter with `getAdapter(provider, adapterOptions)`.
+2. Calls `adapter.fetchProducts()`.
+3. Upserts `ProviderProduct` by `(provider, externalProductId)`.
+4. Deactivates previous active products absent from a non-empty response.
+5. Updates linked Products in `pricingMode: SYNC` with provider and calculated
+   final/base prices.
+
+The implementation has an in-process per-provider lock, batches upserts using
+`SYNC_UPSERT_CONCURRENCY` (default 10), collects individual upsert errors, and
+does not deactivate products for an empty catalogue response.
+
+## Fulfillment and Active Polling
+
+**Active job:** `src/modules/orders/fulfillmentJob.js`
+**Active polling function:** `pollProcessingOrders()` in
+`src/modules/orders/orderFulfillment.service.js`
+
+`server.js` starts `fulfillmentJob` unless safe local production mode is enabled.
+Its default cron expression is `*/5 * * * *` (every five minutes); it does not
+start in tests.
+
+`executeOrder()` obtains the provider external product ID, applies:
 
 ```js
-const translatedValues = applyProviderMapping(
-    order.customerInput.values,    // { player_id: "hero_123", server: "EU" }
-    product.providerMapping        // Map { player_id → "link", server → "server_id" }
-);
-// translatedValues = { link: "hero_123", server_id: "EU" }
-
-await adapter.placeOrder({
-    externalProductId: product.providerProduct.externalProductId,
-    quantity: order.quantity,
-    ...translatedValues,           // spread translated fields
-});
+applyProviderMapping(order.customerInput.values, product.providerMapping)
 ```
 
-### Mapping Rules
+and invokes the adapter with external IDs, `quantity`,
+`referenceId: order.orderNumber`, and mapped customer fields.
 
-1. If `providerMapping` is null or empty → `values` are passed through unchanged
-2. If a key is in `providerMapping` → translated to the mapped key
-3. If a key is **not** in `providerMapping` → passed through unchanged
-4. Works with both plain objects and Mongoose `Map` instances
+The active poller loads up to 200 automatic PROCESSING orders, oldest checked
+first, where `providerOrderId` exists or
+`providerStatus === "PLACEMENT_UNCERTAIN"`. It groups them by immutable
+`order.providerCode`, resolves active providers by slug/name, and batch-checks
+orders with remote IDs.
 
-### Example — No Mapping Needed
+For an uncertain placement with no remote ID, it feature-detects
+`checkOrderByReference` and calls it with `order.orderNumber`:
 
-Some providers accept the same parameter names the platform uses. In that case, `providerMapping` is left empty and values pass through directly.
+- On recovery it saves the real remote ID, status, and raw response, then runs
+  the result through `processOrderStatusResult()`. Future checks use normal
+  `checkOrders()` calls by the recovered remote ID.
+- On no match, unsupported lookup, or lookup failure it remains PROCESSING with
+  `PLACEMENT_UNCERTAIN`, increments retry data, and never submits another order.
 
----
+### Status mapping
 
-## Fulfillment Engine
+`src/modules/providers/statusMapper.js` is case-insensitive:
 
-**File:** `src/modules/orders/orderFulfillment.service.js`
+| Provider status forms | Local order status |
+| --- | --- |
+| `accept`, `completed`, `success`, `done`, `ok`, `delivered`, `fulfilled` | `COMPLETED` |
+| `wait`, `pending`, `queued`, `processing`, in-progress forms, `PLACEMENT_UNCERTAIN` | `PROCESSING` |
+| `partial`, partial-complete forms | `PARTIAL` |
+| `cancelled`, `canceled`, `cancel` | `CANCELED` |
+| `reject`, `rejected`, `failed`, `error`, `refunded`, `expired` | `FAILED` |
+| unknown | `PROCESSING` |
 
-### `executeOrder(orderId)`
+### Retry and refunds
 
-Called immediately after order creation for `executionType === 'automatic'` products.
+`MAX_RETRY_COUNT` is **24**. The current code has two distinct exhaustion paths:
 
-**Flow:**
+- At poll start, an already PROCESSING order with `retryCount >= 24` moves to
+  `MANUAL_REVIEW` without a provider call or automatic refund. Deferred
+  uncertain recovery reaches this path at the limit.
+- For an ordinary non-terminal status passed to `processOrderStatusResult()`,
+  incrementing retryCount to 24 marks the order `FAILED` and runs the normal
+  refund path.
 
-```
-executeOrder(orderId)
-    │
-    ├─ Order.findById(orderId).populate(['productId', 'productId.providerProduct'])
-    │
-    ├─ getProviderAdapter(provider) → adapter
-    │
-    ├─ applyProviderMapping(customerInput.values, product.providerMapping)
-    │
-    ├─ adapter.placeOrder({ externalProductId, quantity, ...translatedFields })
-    │
-    ├─ Parse provider response:
-    │   ├─ Terminal success (Completed/done/accept) → status = COMPLETED
-    │   ├─ Terminal failure (Cancelled/failed/error) → status = FAILED + refund
-    │   └─ Non-terminal (Pending/in_process/wait)   → status = PROCESSING
-    │                                                   providerOrderId = <id>
-    │
-    └─ Save updated order
-```
+Explicit terminal failed, canceled, and partial outcomes retain their current
+refund handling. Uncertain placement alone does not cause a refund.
 
-### Status Resolution
+## Dormant Alternate Poller
 
-The fulfillment engine uses configurable status word lists to classify provider responses:
+`src/modules/orders/orderPolling.service.js` and
+`src/modules/orders/orderPolling.job.js` implement another multi-provider
+poller. Its `start()` defaults to every minute if explicitly called, but
+`server.js` neither imports nor starts it. It is not the polling implementation
+used by normal server startup.
 
-| Provider word | Mapped status |
-|---------------|---------------|
-| `Completed`, `success`, `done`, `accept` | `COMPLETED` |
-| `Cancelled`, `canceled`, `failed`, `error`, `reject`, `rejected`, `cancel` | `FAILED` |
-| `Pending`, `in_process`, `wait` | `PROCESSING` (continues polling) |
+## Adapter Error Conventions
 
-Strings are compared case-insensitively.
-
----
-
-## Order Polling / Status Checking
-
-**File:** `src/modules/orders/orderPolling.service.js`
-**Cron:** `src/modules/orders/fulfillmentJob.js` (every 1 minute)
-
-### Polling Flow
-
-```
-fulfillmentJob triggers every minute
-    │
-    ▼
-Find orders: { status: PROCESSING, providerOrderId: { $ne: null } }
-Sort by lastCheckedAt ASC (oldest-checked first)
-    │
-    ▼
-For each order:
-    adapter.getOrderStatus(providerOrderId)
-    OR
-    adapter.checkOrders([id1, id2, ...]) (batch, if supported)
-    │
-    ├─ Terminal success → COMPLETED
-    ├─ Terminal failure → FAILED + atomic refund
-    └─ Still pending    → increment retryCount + update lastCheckedAt
-                         If retryCount >= MAX_RETRY_COUNT (5):
-                             order.status = FAILED
-                             atomic refund issued
-```
-
-### Retry Exhaustion
-
-If a provider never responds with a terminal status after 5 polling attempts, the order is force-failed and the wallet refunded automatically. The `providerRawResponse` field preserves the last response received for admin inspection.
-
----
-
-## Adding a New Provider
-
-1. **Create the adapter:**
-   ```js
-   // src/modules/providers/adapters/myProvider.adapter.js
-   const { BaseProviderAdapter } = require('./base.adapter');
-
-   class MyProviderAdapter extends BaseProviderAdapter {
-       async getProducts() { /* ... */ }
-       async placeOrder(params) { /* ... */ }
-       async getOrderStatus(providerOrderId) { /* ... */ }
-       async checkOrders(ids) { /* ... */ }
-       async getBalance() { /* ... */ }
-   }
-
-   module.exports = { MyProviderAdapter };
-   ```
-
-2. **Register in the factory:**
-   ```js
-   // adapter.factory.js
-   const { MyProviderAdapter } = require('./myProvider.adapter');
-
-   const registry = new Map([
-       // ...existing entries...
-       ['my-provider', MyProviderAdapter],
-       ['my provider', MyProviderAdapter],
-   ]);
-   ```
-
-3. **Create a Provider document via API:**
-   ```http
-   POST /api/admin/providers
-   {
-     "name": "My Provider",
-     "slug": "my-provider",
-     "baseUrl": "https://api.myprovider.com",
-     "apiToken": "secret"
-   }
-   ```
-
-4. **Sync and publish:**
-   ```http
-   POST /api/admin/catalog/sync/:providerId
-   GET  /api/admin/provider-products/:providerId
-   POST /api/admin/products/from-provider
-   ```
-
----
-
-## Error Handling in Adapters
-
-All adapter methods wrap HTTP calls in `try/catch`. Failures are surfaced as `AppError` subclasses:
-
-| Scenario | Error |
-|----------|-------|
-| Network timeout / 5xx | `BusinessRuleError('PROVIDER_API_ERROR')` |
-| Authentication failure (401/403) | `BusinessRuleError('PROVIDER_AUTH_ERROR')` |
-| Product not found | `NotFoundError('ProviderProduct')` |
-| Place order rejected | `BusinessRuleError('PROVIDER_ORDER_REJECTED')` |
-
-Order placement failures trigger immediate atomic refunds and set `order.status = FAILED`.
+There is no shared AppError-based adapter error contract. Concrete adapters use
+their own Axios wrappers and result shapes. Legacy `placeOrder()` methods
+generally return `{ success: false, ... }` for provider rejection or request
+failure; product, check, and balance methods can reject. Fulfillment applies the
+local status and refund behavior.

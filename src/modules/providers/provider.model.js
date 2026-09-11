@@ -37,6 +37,18 @@ const providerSchema = new mongoose.Schema(
         },
 
         /**
+         * Optional adapter registry key. When set it takes precedence over
+         * slug/name resolution, allowing several provider records to share one
+         * adapter implementation without changing their existing slugs.
+         */
+        adapterType: {
+            type: String,
+            trim: true,
+            lowercase: true,
+            default: null,
+        },
+
+        /**
          * Base URL of the provider's API.
          * The adapter uses this as the root for all HTTP calls.
          */

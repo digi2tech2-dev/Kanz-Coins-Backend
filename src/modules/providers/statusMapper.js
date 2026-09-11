@@ -75,6 +75,7 @@ const _MAP = {
     awaiting:  ORDER_STATUS.PROCESSING,
     new:       ORDER_STATUS.PROCESSING,
     created:   ORDER_STATUS.PROCESSING,
+    placement_uncertain: ORDER_STATUS.PROCESSING,
 
     // ── PARTIAL (provider delivered partial quantity → partial refund) ────────
     partial:              ORDER_STATUS.PARTIAL,

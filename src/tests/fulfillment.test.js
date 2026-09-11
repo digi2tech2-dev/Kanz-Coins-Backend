@@ -38,6 +38,7 @@ const makeMockProvider = (overrides = {}) => ({
     placeOrder: overrides.placeOrder ?? jest.fn(),
     checkOrder: overrides.checkOrder ?? jest.fn(),
     checkOrdersBatch: overrides.checkOrdersBatch ?? jest.fn().mockResolvedValue([]),
+    checkOrderByReference: overrides.checkOrderByReference,
     fetchProducts: overrides.fetchProducts ?? jest.fn().mockResolvedValue([]),
     getMyInfo: overrides.getMyInfo ?? jest.fn().mockResolvedValue({}),
 });
@@ -164,6 +165,18 @@ describe('[2] executeOrder -- provider cases', () => {
         expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
         expect(updated.providerOrderId).toBe(9002);
         expect(updated.refunded).toBe(false);
+    });
+
+    it('passes the persisted local orderNumber as the stable provider reference', async () => {
+        const order = await makeOrderDoc(customer._id, { orderNumber: 'LOCAL-REFERENCE-1' });
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true, providerOrderId: 'REMOTE-1', providerStatus: 'wait', rawResponse: {}, errorMessage: null,
+            }),
+        });
+
+        await executeOrder(order._id, provider);
+        expect(provider.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ referenceId: 'LOCAL-REFERENCE-1' }));
     });
 
     it('Case C: success=true + Cancelled -> CANCELED + wallet refunded', async () => {
@@ -537,6 +550,42 @@ describe('[5] pollProcessingOrders -- cron batch', () => {
 
         const fresh = await Order.findById(order._id);
         expect(fresh.status).toBe(ORDER_STATUS.PROCESSING);
+    });
+
+    it('recovers an uncertain placement by orderNumber without resubmitting or refunding', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            orderNumber: 'LOCAL-RECOVER-1',
+        });
+        const provider = makeMockProvider({
+            checkOrderByReference: jest.fn().mockResolvedValue({
+                found: true, providerOrderId: 'REMOTE-RECOVER-1', providerStatus: 'wait', rawResponse: { status: 'wait' },
+            }),
+        });
+
+        await pollProcessingOrders(provider);
+        const fresh = await Order.findById(order._id);
+        expect(provider.checkOrderByReference).toHaveBeenCalledWith('LOCAL-RECOVER-1');
+        expect(provider.placeOrder).not.toHaveBeenCalled();
+        expect(fresh.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(fresh.providerOrderId).toBe('REMOTE-RECOVER-1');
+        expect(fresh.refunded).toBe(false);
+    });
+
+    it('keeps an unrecovered uncertain placement processing and eventually marks manual review without refund', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            retryCount: MAX_RETRY_COUNT - 1,
+        });
+        const provider = makeMockProvider({ checkOrderByReference: jest.fn().mockResolvedValue({ found: false }) });
+
+        await pollProcessingOrders(provider);
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(fresh.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(fresh.refunded).toBe(false);
     });
 });
 

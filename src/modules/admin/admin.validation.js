@@ -214,6 +214,7 @@ const updateUserAvatarSchema = Joi.object({
 const createProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64).required(),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
+    adapterType: Joi.string().trim().lowercase().max(64).allow('', null),
     baseUrl: Joi.string().uri().required(),
     apiToken: Joi.string().trim().max(4096),
     isActive: Joi.boolean().default(true),
@@ -224,6 +225,7 @@ const createProviderSchema = Joi.object({
 const updateProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
+    adapterType: Joi.string().trim().lowercase().max(64).allow('', null),
     baseUrl: Joi.string().uri(),
     apiToken: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean(),

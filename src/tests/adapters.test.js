@@ -55,6 +55,7 @@ const { TorosfonAdapter } = require('../modules/providers/adapters/toros.adapter
 const { AlkasrVipAdapter } = require('../modules/providers/adapters/alkasr.adapter');
 const { RoyalCrownAdapter } = require('../modules/providers/adapters/royalCrown.adapter');
 const { DealerApiAdapter } = require('../modules/providers/adapters/dealerApi.service');
+const { CanonicalB2BAdapter } = require('../modules/providers/adapters/canonicalB2B.adapter');
 const { getProviderAdapter, registerAdapter } = require('../modules/providers/adapters/adapter.factory');
 const { toInternalStatus, isTerminal, requiresRefund } = require('../modules/providers/statusMapper');
 
@@ -704,6 +705,23 @@ describe('[8] adapter.factory — resolution', () => {
             baseUrl: 'https://x.com', apiToken: 'tok',
         });
         expect(adapter).toBeInstanceOf(DealerApiAdapter);
+    });
+
+    it('resolves canonical-b2b by adapterType before a legacy slug', () => {
+        const adapter = getProviderAdapter({
+            adapterType: ' CANONICAL-B2B ', slug: 'toros', name: 'Site A',
+            baseUrl: 'https://a.example/client/api', apiToken: 'tok-a',
+        });
+        expect(adapter).toBeInstanceOf(CanonicalB2BAdapter);
+    });
+
+    it('lets multiple provider documents share canonical-b2b while retaining configuration', () => {
+        const siteA = getProviderAdapter({ adapterType: 'canonical-b2b', name: 'Site A', slug: 'site-a', baseUrl: 'https://a.example/client/api', apiToken: 'a' });
+        const siteB = getProviderAdapter({ adapterType: 'canonical-b2b', name: 'Site B', slug: 'site-b', baseUrl: 'https://b.example/client/api', apiToken: 'b' });
+        expect(siteA).toBeInstanceOf(CanonicalB2BAdapter);
+        expect(siteB).toBeInstanceOf(CanonicalB2BAdapter);
+        expect(siteA.provider.baseUrl).toBe('https://a.example/client/api');
+        expect(siteB.provider.baseUrl).toBe('https://b.example/client/api');
     });
 
     it('falls back to MockProviderAdapter for unknown slug (non-strict)', () => {
