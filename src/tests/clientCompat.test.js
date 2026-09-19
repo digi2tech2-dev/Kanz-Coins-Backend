@@ -409,6 +409,19 @@ describe('Client compatibility API products and content', () => {
         expect(aliasMinimal.body).toEqual(minimal.body);
     });
 
+    test('keeps Canonical catalog prices in USD for non-USD wallet accounts', async () => {
+        const { token } = await createApiReseller({
+            token: 'egp-catalog-token', userOverrides: { currency: 'EGP' }, groupOverrides: { percentage: 25 },
+        });
+        const product = await createCompatProduct({ basePrice: '8' });
+
+        const response = await rawGet(`/client/api/products?products_id=${product.compatProductId}&base=1`, authHeaders(token));
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual([expect.objectContaining({
+            id: product.compatProductId, price: 10, currency: 'USD',
+        })]);
+    });
+
     test('returns root and category content without exposing legacy /api/client behavior', async () => {
         const { token } = await createApiReseller({ token: 'content-token' });
         const category = await createCompatCategory({ name: 'Root Category' });
