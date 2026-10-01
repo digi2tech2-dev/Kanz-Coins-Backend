@@ -238,6 +238,38 @@ const updateProviderSchema = Joi.object({
 const providerMappingSchema = Joi.object()
     .pattern(Joi.string().trim().min(1), Joi.string().trim().allow(''));
 
+const providerOfferFields = {
+    provider: objectId().required(),
+    providerProduct: objectId().required(),
+    enabled: Joi.boolean(),
+    allowAutomaticRouting: Joi.boolean(),
+    priceSemantics: Joi.string().valid('FIXED_OFFER', 'PER_UNIT', 'QUOTE_REQUIRED').allow(null),
+    supplierCurrency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/).allow(null),
+    maxPriceAgeMs: Joi.number().integer().positive().allow(null),
+    providerMapping: providerMappingSchema,
+    priority: Joi.number().integer(),
+    notes: Joi.string().trim().max(1000).allow(null, ''),
+};
+
+const validateAutomaticOfferMetadata = (value, helpers) => {
+    if (!value.allowAutomaticRouting) return value;
+    if (!value.supplierCurrency) return helpers.error('any.custom', { message: 'supplierCurrency is required for automatic routing' });
+    if (!value.maxPriceAgeMs) return helpers.error('any.custom', { message: 'maxPriceAgeMs is required for automatic routing' });
+    if (!['FIXED_OFFER', 'PER_UNIT'].includes(value.priceSemantics)) {
+        return helpers.error('any.custom', { message: 'automatic routing requires FIXED_OFFER or PER_UNIT price semantics' });
+    }
+    return value;
+};
+
+const createProductProviderOfferSchema = Joi.object(providerOfferFields)
+    .custom(validateAutomaticOfferMetadata);
+
+const updateProductProviderOfferSchema = Joi.object({
+    ...providerOfferFields,
+    provider: objectId(),
+    providerProduct: objectId(),
+}).min(1);
+
 const orderFieldSchema = Joi.object({
     id: Joi.string().trim().required(),
     label: Joi.string().trim().required(),
@@ -323,6 +355,7 @@ const updateAdminProductSchema = Joi.object({
     enableManualPrice: Joi.boolean(),
     manualPriceAdjustment: Joi.alternatives().try(Joi.number(), Joi.string().trim()),
     finalPrice: Joi.alternatives().try(Joi.number(), Joi.string().trim()).allow(null),
+    providerRoutingMode: Joi.string().valid('LEGACY', 'MULTI_PROVIDER'),
 }).min(1);
 
 const listOrdersQuery = Joi.object({
@@ -503,6 +536,8 @@ module.exports = {
         // Products
         createAdminProduct: createAdminProductSchema,
         updateAdminProduct: updateAdminProductSchema,
+        createProductProviderOffer: createProductProviderOfferSchema,
+        updateProductProviderOffer: updateProductProviderOfferSchema,
         // Orders
         listOrdersQuery,
         updateOrderStatus: updateOrderStatusSchema,

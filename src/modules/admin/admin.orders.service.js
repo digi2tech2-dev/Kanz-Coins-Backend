@@ -12,6 +12,7 @@ const { markOrderAsFailed, processOrderRefund } = require('../orders/order.servi
 const { forcedDebitWallet } = require('../wallet/wallet.service');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { Provider } = require('../providers/provider.model');
+const { applyProviderMapping } = require('../orders/orderFields.validator');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
@@ -129,7 +130,7 @@ const getOrderById = async (id) => {
 const retryOrder = async (orderId, adminId, auditContext = null) => {
     const ctx = resolveAuditContext(adminId, auditContext);
     const order = await Order.findById(orderId)
-        .populate({ path: 'productId', populate: { path: 'provider' } });
+        .populate({ path: 'productId', select: 'provider providerMapping', populate: { path: 'provider' } });
 
     if (!order) throw new NotFoundError('Order');
 
@@ -140,13 +141,29 @@ const retryOrder = async (orderId, adminId, auditContext = null) => {
         );
     }
 
-    const providerDoc = order.productId?.provider;
+    const isRoutedOrder = Boolean(
+        order.selectedProviderOffer
+        && order.providerIdSnapshot
+        && order.providerExternalProductIdSnapshot
+        && order.providerQuantitySnapshot
+    );
+    const providerDoc = isRoutedOrder
+        ? await Provider.findById(order.providerIdSnapshot)
+        : order.productId?.provider;
     if (!providerDoc) {
-        throw new BusinessRuleError('No provider linked to this order\'s product.', 'NO_PROVIDER');
+        throw new BusinessRuleError(
+            isRoutedOrder ? 'The snapshotted Provider no longer exists.' : 'No provider linked to this order\'s product.',
+            'NO_PROVIDER'
+        );
+    }
+    if (!providerDoc.isActive) {
+        throw new BusinessRuleError('The selected Provider is inactive.', 'PROVIDER_INACTIVE');
     }
 
     const adapter = getProviderAdapter(providerDoc);
-    const externalProductId = order.providerProductId ?? order.externalProductId;
+    const externalProductId = isRoutedOrder
+        ? order.providerExternalProductIdSnapshot
+        : order.providerProductId ?? order.externalProductId;
     if (!externalProductId) {
         throw new BusinessRuleError('Order has no externalProductId — cannot retry.', 'NO_EXTERNAL_ID');
     }
@@ -154,8 +171,13 @@ const retryOrder = async (orderId, adminId, auditContext = null) => {
     // Place the order at the provider
     const providerResult = await adapter.placeOrder({
         productId: externalProductId,
-        quantity: order.quantity,
-        playerData: order.orderFieldsValues ?? {},
+        externalProductId,
+        quantity: isRoutedOrder ? order.providerQuantitySnapshot : order.quantity,
+        referenceId: order.orderNumber,
+        ...applyProviderMapping(
+            order.customerInput?.values ?? order.orderFieldsValues ?? {},
+            isRoutedOrder ? order.providerMappingSnapshot : order.productId?.providerMapping ?? null
+        ),
     });
 
     // Update order with new provider reference
@@ -257,7 +279,7 @@ const refundOrder = async (orderId, adminId, remains = 0, auditContext = null) =
  */
 const syncOrderProviderStatus = async (orderId, adminId, auditContext = null) => {
     const ctx = resolveAuditContext(adminId, auditContext);
-    const order = await Order.findById(orderId).populate('product');
+    const order = await Order.findById(orderId).populate('productId', 'provider');
     if (!order) throw new NotFoundError('Order');
 
     if (!order.providerOrderId) {
@@ -267,11 +289,12 @@ const syncOrderProviderStatus = async (orderId, adminId, auditContext = null) =>
         );
     }
 
-    // Resolve the provider from the product's provider ref
-    const providerId = order.product?.provider;
+    // Routed orders retain their selected provider; legacy orders use the
+    // historical Product linkage for compatibility.
+    const providerId = order.providerIdSnapshot ?? order.productId?.provider;
     if (!providerId) {
         throw new BusinessRuleError(
-            'This order\'s product has no linked provider.',
+            'This order has no linked provider.',
             'NO_PROVIDER_LINKED'
         );
     }

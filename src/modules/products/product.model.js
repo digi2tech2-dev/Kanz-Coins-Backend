@@ -24,6 +24,12 @@ const EXECUTION_TYPES = Object.freeze({
     AUTOMATIC: 'automatic',  // sent to provider fulfillment engine
 });
 
+/** Which supplier-routing path an automatic Product is allowed to use. */
+const PROVIDER_ROUTING_MODES = Object.freeze({
+    LEGACY: 'LEGACY',
+    MULTI_PROVIDER: 'MULTI_PROVIDER',
+});
+
 /**
  * All field types the frontend form builder supports.
  * Validated server-side during order creation.
@@ -253,6 +259,17 @@ const productSchema = new mongoose.Schema(
             type: String,
             enum: Object.values(EXECUTION_TYPES),
             default: EXECUTION_TYPES.MANUAL,
+        },
+
+        /**
+         * LEGACY keeps the existing scalar provider/providerProduct behavior.
+         * MULTI_PROVIDER requires an explicitly configured ProductProviderOffer.
+         * Existing Products deliberately default to LEGACY even if mappings exist.
+         */
+        providerRoutingMode: {
+            type: String,
+            enum: Object.values(PROVIDER_ROUTING_MODES),
+            default: PROVIDER_ROUTING_MODES.LEGACY,
         },
 
         // ── Provider Linkage ──────────────────────────────────────────────────
@@ -507,6 +524,7 @@ module.exports = {
     PRICING_MODES,
     MARKUP_TYPES,
     EXECUTION_TYPES,
+    PROVIDER_ROUTING_MODES,
     FIELD_TYPES,
     DYNAMIC_FIELD_TYPES,
     computeFinalPrice,

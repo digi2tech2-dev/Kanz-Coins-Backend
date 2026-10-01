@@ -22,8 +22,16 @@
  *   - Toggle active / deactivate
  */
 
-const { Product, PRICING_MODES, MARKUP_TYPES, computeFinalPrice } = require('./product.model');
+const {
+    Product,
+    PRICING_MODES,
+    MARKUP_TYPES,
+    EXECUTION_TYPES,
+    PROVIDER_ROUTING_MODES,
+    computeFinalPrice,
+} = require('./product.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
+const { ProductProviderOffer, PRICE_SEMANTICS } = require('./productProviderOffer.model');
 const { isPositive, add, normalizeProviderDecimalPrice } = require('../../shared/utils/decimalPrecision');
 const {
     NotFoundError,
@@ -37,6 +45,24 @@ const getCanonicalProviderProductPrice = (providerProduct) => normalizeProviderD
     ?? providerProduct?.rawPayload?.price
     ?? 0
 );
+
+const assertAutomaticMultiProviderConfiguration = async (productId) => {
+    const eligibleMetadataExists = await ProductProviderOffer.exists({
+        product: productId,
+        enabled: true,
+        allowAutomaticRouting: true,
+        priceSemantics: { $in: [PRICE_SEMANTICS.FIXED_OFFER, PRICE_SEMANTICS.PER_UNIT] },
+        // V1 supplier-cost comparison is deliberately USD-only.
+        supplierCurrency: 'USD',
+        maxPriceAgeMs: { $gt: 0 },
+    });
+    if (!eligibleMetadataExists) {
+        throw new BusinessRuleError(
+            'Automatic MULTI_PROVIDER routing requires at least one enabled offer with automatic-routing metadata.',
+            'MULTI_PROVIDER_ROUTING_NOT_CONFIGURED'
+        );
+    }
+};
 
 // =============================================================================
 // USER-FACING QUERIES
@@ -348,13 +374,23 @@ const updateProduct = async (productId, updates) => {
         'name', 'description', 'image', 'category', 'displayOrder', 'isActive',
         'displayAccountNumber', 'showAccountNumber',
         'basePrice', 'minQty', 'maxQty', 'pricingMode', 'markupType', 'markupValue',
-        'executionType', 'costPrice', 'orderFields', 'dynamicFields', 'providerMapping',
+        'executionType', 'providerRoutingMode', 'costPrice', 'orderFields', 'dynamicFields', 'providerMapping',
         'provider', 'providerProduct',
         'syncPriceWithProvider', 'enableManualPrice', 'manualPriceAdjustment', 'finalPrice',
     ];
     const safe = Object.fromEntries(
         Object.entries(updates).filter(([k]) => ALLOWED.includes(k))
     );
+
+    const effectiveExecutionType = safe.executionType ?? product.executionType;
+    const effectiveProviderRoutingMode = safe.providerRoutingMode ?? product.providerRoutingMode;
+    if (
+        effectiveExecutionType === EXECUTION_TYPES.AUTOMATIC
+        && effectiveProviderRoutingMode === PROVIDER_ROUTING_MODES.MULTI_PROVIDER
+    ) {
+        // Metadata only: runtime freshness/availability remains an order-time check.
+        await assertAutomaticMultiProviderConfiguration(product._id);
+    }
 
     // ── Determine effective pricing fields ────────────────────────────────
     const effectivePricingMode = safe.pricingMode ?? product.pricingMode;
@@ -541,4 +577,3 @@ module.exports = {
     createProductFromProvider: publishFromProviderProduct,  // prompt-specified name
     toggleProduct: toggleProductStatus,                     // prompt-specified name
 };
-

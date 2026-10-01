@@ -264,6 +264,81 @@ const orderSchema = new mongoose.Schema(
             index: true,
         },
 
+        // ── Immutable multi-provider routing snapshots ──────────────────────
+        // All fields are nullable for historical and legacy-scalar orders.
+        // A routed order must use these fields for dispatch, never the mutable
+        // Product.provider / Product.providerProduct relationship.
+        selectedProviderOffer: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ProductProviderOffer',
+            default: null,
+            index: true,
+        },
+        providerIdSnapshot: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Provider',
+            default: null,
+            index: true,
+        },
+        providerProductIdSnapshot: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ProviderProduct',
+            default: null,
+        },
+        providerExternalProductIdSnapshot: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+        providerCostSnapshot: {
+            type: String,
+            default: null,
+            get: (v) => v == null ? null : String(v),
+            set: (v) => v == null ? null : String(v),
+        },
+        providerCostCurrencySnapshot: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            default: null,
+        },
+        providerNormalizedCostSnapshot: {
+            type: String,
+            default: null,
+            get: (v) => v == null ? null : String(v),
+            set: (v) => v == null ? null : String(v),
+        },
+        providerNormalizedCurrencySnapshot: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            default: null,
+        },
+        providerNormalizationRateSnapshot: {
+            type: String,
+            default: null,
+            get: (v) => v == null ? null : String(v),
+            set: (v) => v == null ? null : String(v),
+        },
+        providerPriceSemanticsSnapshot: {
+            type: String,
+            enum: ['FIXED_OFFER', 'PER_UNIT', 'QUOTE_REQUIRED', null],
+            default: null,
+        },
+        providerQuantitySnapshot: {
+            type: Number,
+            default: null,
+            min: [1, 'providerQuantitySnapshot must be at least 1'],
+        },
+        providerMappingSnapshot: {
+            type: mongoose.Schema.Types.Mixed,
+            default: null,
+        },
+        providerSelectedAt: {
+            type: Date,
+            default: null,
+        },
+
         providerOrderId: {
             type: mongoose.Schema.Types.Mixed,  // Number (Royal Crown) OR String (Alkasr "ID_xxx")
             default: null,

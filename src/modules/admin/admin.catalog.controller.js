@@ -22,6 +22,7 @@ const catalogService = require('../providers/providerCatalog.service');
 const providerService = require('../providers/provider.service');
 const ppService = require('../providers/providerProduct.service');
 const productService = require('../products/product.service');
+const offerService = require('../products/productProviderOffer.service');
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
@@ -303,6 +304,31 @@ const deleteProduct = catchAsync(async (req, res) => {
     sendSuccess(res, product, 'Product deleted.');
 });
 
+// ── Product Provider Offers (admin-owned routing configuration) ───────────────
+
+const listProductProviderOffers = catchAsync(async (req, res) => {
+    const offers = await offerService.listOffersForProduct(req.params.productId);
+    sendSuccess(res, offers, 'Product provider offers retrieved.');
+});
+
+const createProductProviderOffer = catchAsync(async (req, res) => {
+    const offer = await offerService.createOffer({
+        ...req.body,
+        product: req.params.productId,
+    });
+    sendCreated(res, offer, 'Product provider offer created.');
+});
+
+const updateProductProviderOffer = catchAsync(async (req, res) => {
+    const offer = await offerService.updateOffer(req.params.offerId, req.body);
+    sendSuccess(res, offer, 'Product provider offer updated.');
+});
+
+const deleteProductProviderOffer = catchAsync(async (req, res) => {
+    const result = await offerService.removeOffer(req.params.offerId);
+    sendSuccess(res, result, 'Product provider offer removed.');
+});
+
 module.exports = {
     // Sync
     syncProvider,
@@ -320,4 +346,9 @@ module.exports = {
     updateProduct,
     toggleProduct,
     deleteProduct,
+    // ProductProviderOffer routing configuration
+    listProductProviderOffers,
+    createProductProviderOffer,
+    updateProductProviderOffer,
+    deleteProductProviderOffer,
 };

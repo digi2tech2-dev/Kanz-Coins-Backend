@@ -47,6 +47,10 @@ const {
     updateProduct,
     toggleProduct,
     deleteProduct,
+    listProductProviderOffers,
+    createProductProviderOffer,
+    updateProductProviderOffer,
+    deleteProductProviderOffer,
 } = require('./admin.catalog.controller');
 
 const router = express.Router();
@@ -79,6 +83,11 @@ router.use('/products', requirePermission('MANAGE_PRODUCTS'));
 router.get('/products', requirePermission('MANAGE_PRODUCTS'), listProducts);
 router.post('/products', requirePermission('MANAGE_PRODUCTS'), validateBody(schemas.createAdminProduct), createProduct);                   // manual product creation
 router.post('/products/from-provider', requirePermission('MANAGE_PRODUCTS'), createProductFromProvider);
+// ProductProviderOffer routes must precede /products/:id.
+router.get('/products/:productId/provider-offers', requirePermission('MANAGE_PRODUCTS'), listProductProviderOffers);
+router.post('/products/:productId/provider-offers', requirePermission('MANAGE_PRODUCTS'), validateBody(schemas.createProductProviderOffer), createProductProviderOffer);
+router.patch('/product-provider-offers/:offerId', requirePermission('MANAGE_PRODUCTS'), validateBody(schemas.updateProductProviderOffer), updateProductProviderOffer);
+router.delete('/product-provider-offers/:offerId', requirePermission('MANAGE_PRODUCTS'), deleteProductProviderOffer);
 router.patch('/products/:id/toggle', requirePermission('MANAGE_PRODUCTS'), toggleProduct);
 router.delete('/products/:id', requirePermission('MANAGE_PRODUCTS'), deleteProduct);
 router.patch('/products/:id', requirePermission('MANAGE_PRODUCTS'), validateBody(schemas.updateAdminProduct), updateProduct);

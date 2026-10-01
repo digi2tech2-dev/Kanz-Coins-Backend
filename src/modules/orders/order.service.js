@@ -2,7 +2,7 @@
 
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const { Product, computeFinalPrice } = require('../products/product.model');
+const { Product, computeFinalPrice, PROVIDER_ROUTING_MODES } = require('../products/product.model');
 const { Provider } = require('../providers/provider.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('./order.model');
@@ -27,6 +27,7 @@ const { convertUsdToUserCurrency } = require('../../services/currencyConverter.s
 const { User } = require('../users/user.model');
 const Group = require('../groups/group.model');
 const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
+const { selectProviderOfferForOrder, toPlainMapping } = require('../products/providerOfferRouting.service');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 const { notifyNewManualOrder, notifyOrderCompleted, notifyOrderFailed } = require('../notifications/notification.service');
 const whatsappService = require('../whatsapp/whatsapp.service');
@@ -35,6 +36,26 @@ const TRANSACTION_UNSUPPORTED_PATTERN = /Transaction numbers are only allowed|re
 const ORDER_NUMBER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ORDER_NUMBER_LENGTH = 8;
 const ORDER_NUMBER_MAX_ATTEMPTS = 20;
+
+const buildRoutingSnapshot = (selection, selectedAt) => {
+    if (!selection) return {};
+    const { offer, provider, providerProduct, cost } = selection;
+    return {
+        selectedProviderOffer: offer._id,
+        providerIdSnapshot: provider._id,
+        providerProductIdSnapshot: providerProduct._id,
+        providerExternalProductIdSnapshot: cost.externalProductId,
+        providerCostSnapshot: cost.supplierCost,
+        providerCostCurrencySnapshot: cost.supplierCurrency,
+        providerNormalizedCostSnapshot: cost.normalizedCost,
+        providerNormalizedCurrencySnapshot: cost.normalizedCurrency,
+        providerNormalizationRateSnapshot: cost.normalizationRate ?? null,
+        providerPriceSemanticsSnapshot: cost.priceSemantics,
+        providerQuantitySnapshot: cost.providerQuantity,
+        providerMappingSnapshot: toPlainMapping(offer.providerMapping),
+        providerSelectedAt: selectedAt,
+    };
+};
 
 const isTransactionUnsupportedError = (err) => {
     const message = `${err?.message || ''} ${err?.errmsg || ''}`;
@@ -481,10 +502,11 @@ const createOrder = async ({
     if (!resolvedProvider) {
         try {
             const prod = await Product.findById(productId)
-                .select('executionType provider')
+                .select('executionType provider providerRoutingMode')
                 .populate('provider');
             if (
                 prod?.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC &&
+                prod?.providerRoutingMode !== PROVIDER_ROUTING_MODES.MULTI_PROVIDER &&
                 prod?.provider?._id
             ) {
                 const providerDoc = prod.provider.toObject
@@ -612,7 +634,38 @@ const _attemptCreateOrder = async (
             customerInput = { values: orderFieldsValues, fieldsSnapshot: [] };
         }
 
-        // ── 2c. JIT Provider Price Verification ────────────────────────────────
+        // ── 2c. Multi-provider selection (before any debit/quota mutation) ──
+        // Routing mode is explicit. LEGACY ignores ProductProviderOffer records
+        // (including enabled backfilled mappings) and preserves scalar routing.
+        // MULTI_PROVIDER never falls back to Product.provider/providerProduct.
+        let routingSelection = null;
+        if (
+            product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC
+            && product.providerRoutingMode === PROVIDER_ROUTING_MODES.MULTI_PROVIDER
+        ) {
+            const selection = await selectProviderOfferForOrder({
+                product,
+                quantity: qty,
+                customerInput: customerInput?.values ?? {},
+                asOf: new Date(),
+                session,
+            });
+            if (!selection.selected) {
+                throw new BusinessRuleError(
+                    'No eligible provider offer is available for this order.',
+                    'NO_ELIGIBLE_PROVIDER_OFFER'
+                );
+            }
+            routingSelection = selection.selected;
+            providerCode = String(routingSelection.provider.slug || routingSelection.provider.name || '')
+                .toLowerCase().trim() || null;
+            // Selection already performs strict, no-network adapter validation.
+            // Use the selected adapter for immediate fulfillment only; the Order
+            // snapshot remains the source of truth for later execution/retries.
+            provider = getProviderAdapter(routingSelection.provider, { strict: true });
+        }
+
+        // ── 2d. Legacy JIT Provider Price Verification ─────────────────────────
         //
         // If this product is linked to a provider, verify the provider's live
         // price hasn't increased since the last catalog sync.  This prevents
@@ -625,7 +678,7 @@ const _attemptCreateOrder = async (
         // proceeds with the cached DB price.  A transient outage should NOT
         // block legitimate orders.
         //
-        if (product.provider && product.providerProduct && provider) {
+        if (!routingSelection && product.provider && product.providerProduct && provider) {
             try {
                 // Look up the externalProductId from the linked ProviderProduct
                 const ppDoc = await ProviderProduct.findById(product.providerProduct)
@@ -663,7 +716,9 @@ const _attemptCreateOrder = async (
             }
         }
 
-        // ── 2d. Quantity-Only Billing Mode Branch ────────────────────────────
+        const routingSnapshot = buildRoutingSnapshot(routingSelection, new Date());
+
+        // ── 2e. Quantity-Only Billing Mode Branch ────────────────────────────
         // If the user's group uses quantity_only billing, bypass all pricing,
         // currency conversion, and wallet debit. Instead, atomically increment
         // quantityUsed and create an order with zero financial fields.
@@ -729,6 +784,7 @@ const _attemptCreateOrder = async (
                 customerInput,
                 customInputs: customerInput?.values ?? null,
                 providerCode: providerCode ?? null,
+                ...routingSnapshot,
                 currency: 'USD',
                 rateSnapshot: 1,
                 usdAmount: '0',
@@ -848,7 +904,9 @@ const _attemptCreateOrder = async (
         )
             ? String(numericCostPrice)
             : pricing.basePrice;
-        const profitUsd = multiply(subtract(pricing.finalPrice, effectiveUnitCost), String(qty));
+        const profitUsd = routingSelection
+            ? subtract(usdTotalPrice, routingSelection.cost.normalizedCost)
+            : multiply(subtract(pricing.finalPrice, effectiveUnitCost), String(qty));
 
         // ── 3b. Currency Conversion ────────────────────────────────────────────
         // Fetch the user's preferred currency (within the session for consistency).
@@ -911,6 +969,7 @@ const _attemptCreateOrder = async (
             customInputs: customerInput?.values ?? null,
             // ── Provider code snapshot (immutable — cron uses this, not product.provider) ──
             providerCode: providerCode ?? null,
+            ...routingSnapshot,
             // ── Currency snapshot ────────────────────────────────────────────
             currency: userCurrency,
             rateSnapshot,
