@@ -96,9 +96,9 @@ const depositRequestSchema = new mongoose.Schema(
          */
         receiptImage: {
             type: String,
-            required: [true, 'receiptImage is required'],
             trim: true,
             maxlength: [2048, 'receiptImage path cannot exceed 2048 characters'],
+            default: null,
         },
 
         /** Optional customer notes. */

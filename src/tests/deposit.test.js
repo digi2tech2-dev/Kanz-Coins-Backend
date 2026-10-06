@@ -51,12 +51,22 @@
  */
 
 const mongoose = require('mongoose');
+jest.mock('../shared/services/receiptAnalyzer.service', () => ({
+    analyzeReceiptBuffer: jest.fn(),
+}));
+
 const { DepositRequest, DEPOSIT_STATUS } = require('../modules/deposits/deposit.model');
 const depositService = require('../modules/deposits/deposit.service');
+const depositController = require('../modules/deposits/deposit.controller');
 const { AuditLog } = require('../modules/audit/audit.model');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES } = require('../modules/audit/audit.constants');
 const { User } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { Currency } = require('../modules/currency/currency.model');
+const { Setting } = require('../modules/admin/setting.model');
+const { invalidateSettingsCache } = require('../modules/admin/admin.settings.service');
+const { analyzeReceiptBuffer } = require('../shared/services/receiptAnalyzer.service');
+const { isAutomatedPaymentMethod } = require('../modules/deposits/paymentMethodAutomation.service');
 
 const {
     connectTestDB,
@@ -94,6 +104,51 @@ const VALID_DEPOSIT = {
     amountUsd: 500,
     receiptImage: 'uploads/deposits/receipt.jpg',
 };
+
+const seedPaymentMethods = async () => {
+    await Setting.updateOne(
+        { key: 'paymentGroups' },
+        {
+            $set: {
+                key: 'paymentGroups',
+                value: [{
+                    id: 'egp-methods',
+                    name: 'EGP methods',
+                    currency: 'EGP',
+                    isActive: true,
+                    methods: [
+                        {
+                            id: 'vodafone-automated',
+                            name: 'Mobile Wallet',
+                            type: 'mobile_wallet',
+                            accountNumber: '01000000000',
+                            isActive: true,
+                        },
+                        {
+                            id: 'mobile-wallet-automated',
+                            name: 'فودافون كاش',
+                            type: 'mobile_wallet',
+                            isActive: true,
+                        },
+                        { id: 'usdt-automated', name: 'USDT', type: 'crypto', accountNumber: 'TAbc123', isActive: true },
+                        { id: 'orange-cash-manual', name: 'Orange Cash', type: 'mobile_wallet', accountNumber: '01234567890', isActive: true },
+                        { id: 'bank-transfer-manual', name: 'Bank Transfer', type: 'bank', accountNumber: '123456789', isActive: true },
+                    ],
+                }],
+            },
+        },
+        { upsert: true }
+    );
+    invalidateSettingsCache('paymentGroups');
+};
+
+const invokeCreateDeposit = (req) => new Promise((resolve) => {
+    const res = {
+        status: jest.fn(() => res),
+        json: jest.fn((body) => resolve({ body, res })),
+    };
+    depositController.createDeposit(req, res, (error) => resolve({ error, res }));
+});
 
 let _group;
 const ensureGroup = async () => {
@@ -148,17 +203,16 @@ describe('[1] Model validation', () => {
         ).rejects.toThrow(/greater than 0/);
     });
 
-    it('rejects when receiptImage is missing', async () => {
-        await expect(
-            DepositRequest.create({
-                userId,
-                paymentMethodId: new mongoose.Types.ObjectId(),
-                requestedAmount: 100,
-                currency: 'USD',
-                exchangeRate: 1,
-                amountUsd: 100,
-            })
-        ).rejects.toThrow(/receiptImage is required/);
+    it('allows a null receiptImage so automated deposits can be persisted', async () => {
+        const deposit = await DepositRequest.create({
+            userId,
+            paymentMethodId: new mongoose.Types.ObjectId(),
+            requestedAmount: 100,
+            currency: 'USD',
+            exchangeRate: 1,
+            amountUsd: 100,
+        });
+        expect(deposit.receiptImage).toBeNull();
     });
 
     it('rejects when paymentMethodId is missing', async () => {
@@ -268,6 +322,109 @@ describe('[2] createDepositRequest', () => {
 
         const count = await DepositRequest.countDocuments({ userId: customer._id });
         expect(count).toBe(2);
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [2b] Receipt policy for automated payment methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('[2b] automated deposit receipt policy', () => {
+    let customer;
+
+    beforeEach(async () => {
+        const group = await ensureGroup();
+        customer = await createCustomer({ groupId: group._id, currency: 'EGP' });
+        await Currency.create({ code: 'EGP', name: 'Egyptian Pound', symbol: 'EGP', platformRate: 1, isActive: true });
+        await seedPaymentMethods();
+        analyzeReceiptBuffer.mockReset();
+    });
+
+    const baseRequest = (overrides = {}) => ({
+        user: { _id: customer._id },
+        body: {
+            requestedAmount: '500',
+            currency: 'EGP',
+            paymentMethodId: 'vodafone-automated',
+            transactionId: '022494991382',
+            senderWalletNumber: '01012572681',
+            ...overrides,
+        },
+    });
+
+    it('treats configured Vodafone methods as automated regardless of destination account number', async () => {
+        await expect(isAutomatedPaymentMethod('vodafone-automated')).resolves.toBe(true);
+        await expect(isAutomatedPaymentMethod('mobile-wallet-automated')).resolves.toBe(true);
+    });
+
+    it('keeps configured USDT automated and fails closed for non-automated or unknown methods', async () => {
+        await expect(isAutomatedPaymentMethod('usdt-automated')).resolves.toBe(true);
+        await expect(isAutomatedPaymentMethod('orange-cash-manual')).resolves.toBe(false);
+        await expect(isAutomatedPaymentMethod('bank-transfer-manual')).resolves.toBe(false);
+        await expect(isAutomatedPaymentMethod('unknown-vodafone-method')).resolves.toBe(false);
+    });
+
+    it('creates a receiptless automated Vodafone deposit with a destination account as PENDING', async () => {
+        const result = await invokeCreateDeposit(baseRequest());
+
+        expect(result.error).toBeUndefined();
+        expect(result.res.status).toHaveBeenCalledWith(201);
+        expect(result.body.data.status).toBe(DEPOSIT_STATUS.PENDING);
+        expect(result.body.data.receiptImage).toBeNull();
+        expect(analyzeReceiptBuffer).not.toHaveBeenCalled();
+    });
+
+    it('accepts a valid receipt for an automated Vodafone deposit', async () => {
+        analyzeReceiptBuffer.mockResolvedValue({ isValid: true });
+        const request = baseRequest();
+        request.file = {
+            buffer: Buffer.from('valid-image'),
+            filename: 'automated.png',
+            mimetype: 'image/png',
+            originalname: 'automated.png',
+        };
+
+        const result = await invokeCreateDeposit(request);
+
+        expect(result.error).toBeUndefined();
+        expect(result.body.data.receiptImage).toBe('uploads/deposits/automated.png');
+        expect(analyzeReceiptBuffer).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['manual non-Vodafone mobile wallet', 'orange-cash-manual'],
+        ['manual bank transfer', 'bank-transfer-manual'],
+        ['unknown payment method', 'unknown-vodafone-method'],
+    ])('rejects a receiptless %s deposit', async (_label, paymentMethodId) => {
+        const result = await invokeCreateDeposit(baseRequest({ paymentMethodId }));
+        expect(result.error).toMatchObject({ code: 'RECEIPT_REQUIRED' });
+    });
+
+    it('defends the service boundary against a receiptless manual deposit', async () => {
+        await expect(depositService.createDepositRequest({
+            userId: customer._id,
+            paymentMethodId: 'orange-cash-manual',
+            requestedAmount: 500,
+            currency: 'EGP',
+            exchangeRate: 1,
+            amountUsd: 500,
+            receiptImage: null,
+        })).rejects.toMatchObject({ code: 'RECEIPT_REQUIRED' });
+    });
+
+    it('retains invalid-image rejection for manual deposits', async () => {
+        analyzeReceiptBuffer.mockResolvedValue({ isValid: false });
+        const request = baseRequest({ paymentMethodId: 'orange-cash-manual' });
+        request.file = {
+            buffer: Buffer.from('not-a-receipt'),
+            filename: 'invalid.png',
+            mimetype: 'image/png',
+            originalname: 'invalid.png',
+        };
+
+        const result = await invokeCreateDeposit(request);
+
+        expect(result.error).toMatchObject({ code: 'INVALID_RECEIPT_IMAGE' });
     });
 });
 

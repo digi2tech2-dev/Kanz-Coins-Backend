@@ -82,8 +82,11 @@ const analyzeReceiptUpload = catchAsync(async (req, _res, next) => {
  * BEFORE this handler — req.file is populated on success.
  */
 const createDeposit = catchAsync(async (req, res) => {
+    const { requestedAmount, currency, paymentMethodId, notes } = req.body;
+    const automated = await depositService.isAutomatedPaymentMethod(paymentMethodId);
+
     // ── Validate file upload ─────────────────────────────────────────────
-    if (!req.file) {
+    if (!automated && !req.file) {
         throw new BusinessRuleError(
             'Receipt image is required. Please upload a file.',
             'RECEIPT_REQUIRED'
@@ -94,7 +97,6 @@ const createDeposit = catchAsync(async (req, res) => {
         await validateReceiptUpload(req.file);
     }
 
-    const { requestedAmount, currency, paymentMethodId, notes } = req.body;
     const senderDetails = depositService.normalizeSenderDetails(req.body);
     const paymentTransactionId = req.body.transactionId
         || req.body.transactionNumber
@@ -123,7 +125,9 @@ const createDeposit = catchAsync(async (req, res) => {
 
     // ── Build relative receipt path ──────────────────────────────────────
     // req.file.path is absolute; we store only the relative part.
-    const receiptImage = `uploads/deposits/${req.file.filename}`;
+    const receiptImage = req.file
+        ? `uploads/deposits/${req.file.filename}`
+        : null;
 
     // ── Persist ──────────────────────────────────────────────────────────
     const deposit = await depositService.createDepositRequest({

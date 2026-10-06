@@ -11,6 +11,8 @@ const paymentEventService = require('../modules/paymentEvents/paymentEvent.servi
 const { classifyAndParseSms } = require('../modules/paymentEvents/vodafoneSms.parser');
 const { User } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { Setting } = require('../modules/admin/setting.model');
+const { invalidateSettingsCache } = require('../modules/admin/admin.settings.service');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -75,6 +77,7 @@ const createVodafoneDeposit = async ({
     transactionId = '022494991382',
     phone = '01012572681',
     paymentMethodId = 'vodafone',
+    receiptImage = 'uploads/deposits/receipt.jpg',
 } = {}) => depositService.createDepositRequest({
     userId,
     paymentMethodId,
@@ -82,7 +85,7 @@ const createVodafoneDeposit = async ({
     currency: 'EGP',
     exchangeRate: 1,
     amountUsd: amount,
-    receiptImage: 'uploads/deposits/receipt.jpg',
+    receiptImage,
     senderDetails: {
         methodType: 'mobile_wallet',
         field: 'senderWalletNumber',
@@ -92,6 +95,32 @@ const createVodafoneDeposit = async ({
     },
     paymentTransactionId: transactionId,
 });
+
+const seedAutomatedVodafoneMethod = async () => {
+    await Setting.updateOne(
+        { key: 'paymentGroups' },
+        {
+            $set: {
+                key: 'paymentGroups',
+                value: [{
+                    id: 'egp-methods',
+                    name: 'EGP methods',
+                    currency: 'EGP',
+                    isActive: true,
+                    methods: [{
+                        id: 'vodafone',
+                        name: 'Vodafone Cash',
+                        type: 'mobile_wallet',
+                        accountNumber: '01000000000',
+                        isActive: true,
+                    }],
+                }],
+            },
+        },
+        { upsert: true }
+    );
+    invalidateSettingsCache('paymentGroups');
+};
 
 beforeAll(async () => {
     await connectTestDB();
@@ -273,6 +302,28 @@ describe('Vodafone SMS bridge idempotency and matching', () => {
 });
 
 describe('Vodafone SMS bridge auto approval guardrails', () => {
+    test('auto-approves a receiptless automated Vodafone deposit exactly once after an exact SMS match', async () => {
+        config.vodafoneSmsBridge.autoApprove = true;
+        const group = await createGroup({ percentage: 0 });
+        const customer = await createCustomer({ groupId: group._id, walletBalance: 0, currency: 'EGP' });
+        await seedAutomatedVodafoneMethod();
+        const deposit = await createVodafoneDeposit({ userId: customer._id, receiptImage: null });
+        const payload = payloadFor(vodafoneText(), Date.now());
+
+        const first = await postSms(payload);
+        const second = await postSms(payload);
+        const freshDeposit = await DepositRequest.findById(deposit._id);
+        const freshUser = await User.findById(customer._id);
+        const ledgerCount = await WalletTransaction.countDocuments({ userId: customer._id, type: 'CREDIT' });
+
+        expect(first.autoApproved).toBe(true);
+        expect(second.duplicate).toBe(true);
+        expect(freshDeposit.receiptImage).toBeNull();
+        expect(freshDeposit.status).toBe(DEPOSIT_STATUS.APPROVED);
+        expect(freshUser.walletBalance).toBe(500);
+        expect(ledgerCount).toBe(1);
+    });
+
     test('auto approval enabled calls canonical approval once for exact Vodafone wallet match', async () => {
         config.vodafoneSmsBridge.autoApprove = true;
         const group = await createGroup({ percentage: 0 });

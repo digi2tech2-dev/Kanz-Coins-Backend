@@ -15,6 +15,7 @@ const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { notifyNewDeposit, notifyDepositApproved, notifyDepositRejected } = require('../notifications/notification.service');
 const whatsappService = require('../whatsapp/whatsapp.service');
+const { isAutomatedPaymentMethod } = require('./paymentMethodAutomation.service');
 
 const SYSTEM_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001');
 
@@ -116,7 +117,7 @@ const normalizePaymentTransactionId = (value) => {
  * @param {string}          params.currency
  * @param {number}          params.exchangeRate
  * @param {number}          params.amountUsd
- * @param {string}          params.receiptImage
+ * @param {string|null}     params.receiptImage
  * @param {string|null}     [params.notes]
  * @param {Object|null}     [params.senderDetails]
  * @param {Object|null}     [params.auditContext]
@@ -140,6 +141,14 @@ const createDepositRequest = async ({
     const user = await User.findById(userId).select('_id role name email');
     if (!user) throw new NotFoundError('User');
 
+    const normalizedReceiptImage = String(receiptImage || '').trim() || null;
+    if (!normalizedReceiptImage && !(await isAutomatedPaymentMethod(paymentMethodId))) {
+        throw new BusinessRuleError(
+            'Receipt image is required. Please upload a file.',
+            'RECEIPT_REQUIRED'
+        );
+    }
+
     const normalizedPaymentTransactionId = normalizePaymentTransactionId(
         paymentTransactionId
         || senderDetails?.transactionNumber
@@ -152,7 +161,7 @@ const createDepositRequest = async ({
         currency,
         exchangeRate,
         amountUsd: Number(parseFloat(amountUsd).toFixed(2)),
-        receiptImage,
+        receiptImage: normalizedReceiptImage,
         notes,
         senderDetails,
         paymentTransactionId: normalizedPaymentTransactionId,
@@ -678,4 +687,5 @@ module.exports = {
     getDepositById,
     updatePendingDeposit,
     normalizeSenderDetails,
+    isAutomatedPaymentMethod,
 };
