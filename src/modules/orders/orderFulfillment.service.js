@@ -35,6 +35,25 @@ const {
 const { toInternalStatus, isTerminal, requiresRefund } = require('../providers/statusMapper');
 const { notifyOrderCompleted, notifyOrderFailed } = require('../notifications/notification.service');
 
+/**
+ * Atomically move a provider-fulfilled order out of PROCESSING.
+ *
+ * Provider responses are asynchronous and may arrive out of order.  Every
+ * terminal transition must therefore compare against the persisted state, not
+ * a stale document read before an HTTP request.
+ */
+const transitionFromProcessing = async (orderId, set, extraFilter = {}) => {
+    return Order.findOneAndUpdate(
+        {
+            _id: orderId,
+            status: ORDER_STATUS.PROCESSING,
+            ...extraFilter,
+        },
+        { $set: set },
+        { new: true }
+    );
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,8 +201,9 @@ const { Product } = require('../products/product.model');
  * If no provider adapter is passed, the function self-resolves it from
  * Product.provider. If that also fails, the order is marked FAILED + refund.
  *
- * This function NEVER throws — all errors are caught, the order is marked
- * FAILED, and a refund is attempted.
+ * This function NEVER throws. Explicit pre-dispatch resolution failures and
+ * normalized provider rejections may fail/refund; unexpected failures move a
+ * still-processing order to MANUAL_REVIEW without an automatic refund.
  *
  * @param {string|ObjectId} orderId
  * @param {Object|null}     [provider]      - adapter instance (null = self-resolve)
@@ -246,16 +266,23 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         } catch (resolveErr) {
             console.error(`[Fulfillment] Provider resolution failed for order ${orderId}:`, resolveErr.message);
 
-            // Mark FAILED with clear diagnostic message
+            // Provider resolution is known to have failed before placeOrder().
+            // Still use a CAS transition so a concurrent worker cannot turn an
+            // already terminal order into FAILED.
             const now = new Date();
-            await Order.findByIdAndUpdate(orderId, {
-                $set: {
-                    status: ORDER_STATUS.FAILED,
-                    providerRawResponse: { error: resolveErr.message },
-                    failedAt: now,
-                    lastCheckedAt: now,
-                },
+            const failedOrder = await transitionFromProcessing(orderId, {
+                status: ORDER_STATUS.FAILED,
+                providerRawResponse: { error: resolveErr.message },
+                failedAt: now,
+                lastCheckedAt: now,
+            }, {
+                providerOrderId: null,
+                providerStatus: null,
             });
+
+            if (!failedOrder) {
+                return { order: await Order.findById(orderId), placed: false, refunded: false };
+            }
 
             createAuditLog({
                 actorId, actorRole, ipAddress, userAgent,
@@ -268,8 +295,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             // Refund the user
             let refundIssued = false;
             try {
-                const freshOrder = await Order.findById(orderId);
-                refundIssued = await refundFailedOrder(freshOrder);
+                refundIssued = await refundFailedOrder(failedOrder);
             } catch (refundErr) {
                 console.error(`[Fulfillment] Refund FAILED for order ${orderId}:`, refundErr.message);
             }
@@ -300,7 +326,32 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             : order.productId?.providerMapping ?? null
     );
 
-    // ── Call the provider ──────────────────────────────────────────────────────
+    // ── Claim provider dispatch, then call the provider ─────────────────────────
+    // A claim is persisted before the outbound request.  A second executeOrder()
+    // invocation sees PLACEMENT_UNCERTAIN and must recover by reference instead of
+    // submitting another provider order.
+    const dispatchClaimedAt = new Date();
+    const claimedOrder = await Order.findOneAndUpdate(
+        {
+            _id: orderId,
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: null,
+            providerStatus: null,
+        },
+        {
+            $set: {
+                providerStatus: 'PLACEMENT_UNCERTAIN',
+                providerRawResponse: { placement: 'dispatching' },
+                lastCheckedAt: dispatchClaimedAt,
+            },
+        },
+        { new: true }
+    );
+
+    if (!claimedOrder) {
+        return { order: await Order.findById(orderId), placed: false, refunded: false };
+    }
+
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
 
     let result;
@@ -315,42 +366,23 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             ...mappedCustomerFields,   // ← spread translated customer fields onto params
         });
     } catch (err) {
-        // Classify the error: transient (network/timeout) vs hard rejection.
-        //
-        // TRANSIENT → keep PROCESSING so the cron can retry later.
-        //   Refunding immediately on a network blip would cause a double-loss:
-        //   the provider may have already accepted and queued the order.
-        //
-        // HARD FAILURE → order cannot proceed → mark FAILED + refund.
-        const isTransient =
-            err.code === 'ECONNABORTED'  ||
-            err.code === 'ETIMEDOUT'     ||
-            err.code === 'ECONNRESET'    ||
-            err.code === 'ENOTFOUND'     ||
-            err.response?.status === 503 ||
-            err.response?.status === 504 ||
-            String(err.message ?? '').toLowerCase().includes('timeout');
-
-        if (isTransient) {
-            console.warn(`[Fulfillment] Transient error placing order ${orderId} — leaving PROCESSING for cron retry:`, err.message);
-            // Return a synthetic "still pending" result — DO NOT refund.
-            result = {
-                success: true,
-                providerOrderId: null,
-                providerStatus: 'Pending',         // → stays PROCESSING
-                rawResponse: { message: err.message, isTransient: true },
-                errorMessage: null,
-            };
-        } else {
-            // Hard failure: provider explicitly rejected or gave an unexpected error.
-            result = {
-                success: false,
-                providerOrderId: null,
-                providerStatus: 'Cancelled',
-                rawResponse: err.providerBody ?? { message: err.message },
-                errorMessage: err.message,
-            };
-        }
+        // A thrown call has no trustworthy normalized provider outcome.  The
+        // provider may have accepted the request before a timeout, reset, HTTP
+        // error, DNS failure, or client error was observed.  Never refund or
+        // resubmit from this path; recover using the persisted order reference.
+        console.warn(`[Fulfillment] Ambiguous error placing order ${orderId} — leaving PROCESSING for reference recovery:`, err.message);
+        result = {
+            success: true,
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            rawResponse: {
+                message: err.message,
+                code: err.code ?? null,
+                httpStatus: err.response?.status ?? null,
+                placement: 'uncertain',
+            },
+            errorMessage: null,
+        };
     }
 
     console.log(`[Fulfillment] Provider response for order ${orderId}:`, JSON.stringify(result));
@@ -373,16 +405,23 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     const now = new Date();
 
     if (newStatus === ORDER_STATUS.FAILED) {
-        await Order.findByIdAndUpdate(orderId, {
-            $set: {
-                status: ORDER_STATUS.FAILED,
-                providerStatus: result.providerStatus,
-                providerOrderId: result.providerOrderId,
-                providerRawResponse: result.rawResponse,
-                failedAt: now,
-                lastCheckedAt: now,
-            },
+        const failedOrder = await transitionFromProcessing(orderId, {
+            status: ORDER_STATUS.FAILED,
+            providerStatus: result.providerStatus,
+            providerOrderId: result.providerOrderId,
+            providerRawResponse: result.rawResponse,
+            failedAt: now,
+            lastCheckedAt: now,
+        }, {
+            // A normalized rejection is safe to refund only while this
+            // execution still owns the pre-dispatch PLACEMENT_UNCERTAIN claim.
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
         });
+
+        if (!failedOrder) {
+            return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
 
         // Audit: placement failed
         createAuditLog({
@@ -408,28 +447,40 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
         // Refund
         try {
-            const freshOrder = await Order.findById(orderId);
-            refundIssued = await refundFailedOrder(freshOrder);
+            refundIssued = await refundFailedOrder(failedOrder);
         } catch (refundErr) {
             console.error(`[Fulfillment] Refund FAILED for order ${orderId}:`, refundErr.message);
         }
 
         // Notification: fire-and-forget
-        notifyOrderFailed(await Order.findById(orderId).catch(() => null));
+        notifyOrderFailed(failedOrder);
 
         return { order: await Order.findById(orderId), placed: false, refunded: refundIssued };
     }
 
     if (newStatus === ORDER_STATUS.PROCESSING) {
         // Case B: pending — save providerOrderId, cron will poll
-        await Order.findByIdAndUpdate(orderId, {
-            $set: {
-                providerOrderId: result.providerOrderId,
-                providerStatus: result.providerStatus,
-                providerRawResponse: result.rawResponse,
-                lastCheckedAt: now,
+        const pendingOrder = await Order.findOneAndUpdate(
+            {
+                _id: orderId,
+                status: ORDER_STATUS.PROCESSING,
+                providerOrderId: null,
+                providerStatus: 'PLACEMENT_UNCERTAIN',
             },
-        });
+            {
+                $set: {
+                    providerOrderId: result.providerOrderId,
+                    providerStatus: result.providerStatus,
+                    providerRawResponse: result.rawResponse,
+                    lastCheckedAt: now,
+                },
+            },
+            { new: true }
+        );
+
+        if (!pendingOrder) {
+            return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
 
         createAuditLog({
             actorId, actorRole, ipAddress, userAgent,
@@ -443,20 +494,27 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             },
         });
 
-        return { order: await Order.findById(orderId), placed: true, refunded: false };
+        return { order: pendingOrder, placed: true, refunded: false };
     }
 
     if (newStatus === ORDER_STATUS.CANCELED) {
-        await Order.findByIdAndUpdate(orderId, {
-            $set: {
-                status: ORDER_STATUS.CANCELED,
-                providerOrderId: result.providerOrderId,
-                providerStatus: result.providerStatus,
-                providerRawResponse: result.rawResponse,
-                failedAt: now,
-                lastCheckedAt: now,
-            },
+        const canceledOrder = await transitionFromProcessing(orderId, {
+            status: ORDER_STATUS.CANCELED,
+            providerOrderId: result.providerOrderId,
+            providerStatus: result.providerStatus,
+            providerRawResponse: result.rawResponse,
+            failedAt: now,
+            lastCheckedAt: now,
+        }, {
+            // Do not let a late placement response override a provider order
+            // already recovered by reference and returned as still pending.
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
         });
+
+        if (!canceledOrder) {
+            return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
 
         createAuditLog({
             actorId, actorRole, ipAddress, userAgent,
@@ -480,27 +538,39 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         });
 
         try {
-            const freshOrder = await Order.findById(orderId);
-            refundIssued = await refundFailedOrder(freshOrder);
+            refundIssued = await refundFailedOrder(canceledOrder);
         } catch (refundErr) {
             console.error(`[Fulfillment] Refund FAILED for canceled order ${orderId}:`, refundErr.message);
         }
 
-        notifyOrderFailed(await Order.findById(orderId).catch(() => null));
+        notifyOrderFailed(canceledOrder);
 
         return { order: await Order.findById(orderId), placed: false, refunded: refundIssued };
     }
 
     if (newStatus === ORDER_STATUS.PARTIAL) {
-        return processOrderStatusResult(
-            await Order.findByIdAndUpdate(orderId, {
+        const pendingPartial = await Order.findOneAndUpdate(
+            {
+                _id: orderId,
+                status: ORDER_STATUS.PROCESSING,
+                providerOrderId: null,
+                providerStatus: 'PLACEMENT_UNCERTAIN',
+            },
+            {
                 $set: {
                     providerOrderId: result.providerOrderId,
                     providerStatus: result.providerStatus,
                     providerRawResponse: result.rawResponse,
                     lastCheckedAt: now,
                 },
-            }, { new: true }),
+            },
+            { new: true }
+        );
+        if (!pendingPartial) {
+            return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
+        return processOrderStatusResult(
+            pendingPartial,
             {
                 providerOrderId: result.providerOrderId,
                 providerStatus: result.providerStatus,
@@ -510,15 +580,17 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     // Case A: Completed immediately
-    await Order.findByIdAndUpdate(orderId, {
-        $set: {
-            status: ORDER_STATUS.COMPLETED,
-            providerOrderId: result.providerOrderId,
-            providerStatus: result.providerStatus,
-            providerRawResponse: result.rawResponse,
-            lastCheckedAt: now,
-        },
+    const completedOrder = await transitionFromProcessing(orderId, {
+        status: ORDER_STATUS.COMPLETED,
+        providerOrderId: result.providerOrderId,
+        providerStatus: result.providerStatus,
+        providerRawResponse: result.rawResponse,
+        lastCheckedAt: now,
     });
+
+    if (!completedOrder) {
+        return { order: await Order.findById(orderId), placed: false, refunded: false };
+    }
 
     createAuditLog({
         actorId, actorRole, ipAddress, userAgent,
@@ -540,30 +612,23 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     });
 
     // Notification: fire-and-forget
-    notifyOrderCompleted(await Order.findById(orderId));
+    notifyOrderCompleted(completedOrder);
 
-    return { order: await Order.findById(orderId), placed: true, refunded: false };
+    return { order: completedOrder, placed: true, refunded: false };
 
     // ─── END OF TOP-LEVEL CRASH GUARD ──────────────────────────────────────
     } catch (fatalErr) {
-        // Something completely unexpected crashed — mark FAILED + refund
+        // Something completely unexpected crashed.  The provider may already
+        // have accepted the request, so preserve funds and require review.
         console.error(`[Fulfillment] FATAL crash in executeOrder for ${orderId}:`, fatalErr);
 
         try {
             const now = new Date();
-            await Order.findByIdAndUpdate(orderId, {
-                $set: {
-                    status: ORDER_STATUS.FAILED,
-                    providerRawResponse: { fatalError: fatalErr.message, stack: fatalErr.stack },
-                    failedAt: now,
-                    lastCheckedAt: now,
-                },
+            await transitionFromProcessing(orderId, {
+                status: ORDER_STATUS.MANUAL_REVIEW,
+                providerRawResponse: { fatalError: fatalErr.message, stack: fatalErr.stack },
+                lastCheckedAt: now,
             });
-
-            const freshOrder = await Order.findById(orderId);
-            if (freshOrder) {
-                await refundFailedOrder(freshOrder);
-            }
         } catch (cleanupErr) {
             console.error(`[Fulfillment] Cleanup also failed for ${orderId}:`, cleanupErr.message);
         }
@@ -584,7 +649,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
  *
  * @param {Object} order        - Mongoose Order document (must be PROCESSING)
  * @param {Object} statusResult - { providerOrderId, providerStatus, rawResponse }
- * @returns {Promise<{ action: 'completed'|'failed'|'pending'|'skipped' }>}
+ * @returns {Promise<{ action: 'completed'|'failed'|'pending'|'manual-review'|'skipped' }>}
  */
 const processOrderStatusResult = async (order, statusResult) => {
     if (order.status !== ORDER_STATUS.PROCESSING) {
@@ -599,17 +664,28 @@ const processOrderStatusResult = async (order, statusResult) => {
         const newRetry = order.retryCount + 1;
 
         if (newRetry >= MAX_RETRY_COUNT) {
-            // Exceeded retry limit → force-fail
-            await Order.findByIdAndUpdate(order._id, {
-                $set: {
-                    status: ORDER_STATUS.FAILED,
-                    providerStatus: providerStatus,
-                    providerRawResponse: statusResult.rawResponse,
-                    retryCount: newRetry,
-                    failedAt: now,
-                    lastCheckedAt: now,
+            // Pending/Processing is not a confirmed provider failure.
+            // Escalate for manual investigation and never auto-refund.
+            const moved = await Order.findOneAndUpdate(
+                {
+                    _id: order._id,
+                    status: ORDER_STATUS.PROCESSING,
                 },
-            });
+                {
+                    $set: {
+                        status: ORDER_STATUS.MANUAL_REVIEW,
+                        providerStatus,
+                        providerRawResponse: statusResult.rawResponse,
+                        retryCount: newRetry,
+                        lastCheckedAt: now,
+                    },
+                },
+                { new: true }
+            );
+
+            if (!moved) {
+                return { action: 'skipped' };
+            }
 
             createAuditLog({
                 actorId: order.userId,
@@ -620,50 +696,44 @@ const processOrderStatusResult = async (order, statusResult) => {
                 metadata: {
                     orderId: order._id.toString(),
                     providerOrderId: order.providerOrderId,
+                    providerStatus,
                     retryCount: newRetry,
+                    reason: 'PENDING_RETRY_LIMIT',
                 },
             });
 
-            createAuditLog({
-                actorId: order.userId,
-                actorRole: ACTOR_ROLES.SYSTEM,
-                action: ORDER_ACTIONS.FAILED,
-                entityType: ENTITY_TYPES.ORDER,
-                entityId: order._id,
-                metadata: { orderId: order._id.toString(), reason: 'RETRY_LIMIT_EXCEEDED' },
-            });
-
-            const freshOrder = await Order.findById(order._id);
-            await refundFailedOrder(freshOrder).catch((e) =>
-                console.error(`[Fulfillment] Refund error (retry limit) for ${order._id}:`, e.message)
-            );
-
-            return { action: 'failed' };
+            return { action: 'manual-review' };
         }
 
         // Not yet at limit — just update retry count and lastCheckedAt
-        await Order.findByIdAndUpdate(order._id, {
-            $set: {
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
-                retryCount: newRetry,
-                lastCheckedAt: now,
+        const pendingOrder = await Order.findOneAndUpdate(
+            { _id: order._id, status: ORDER_STATUS.PROCESSING },
+            {
+                $set: {
+                    providerStatus: providerStatus,
+                    providerRawResponse: statusResult.rawResponse,
+                    retryCount: newRetry,
+                    lastCheckedAt: now,
+                },
             },
-        });
+            { new: true }
+        );
 
-        return { action: 'pending' };
+        return { action: pendingOrder ? 'pending' : 'skipped' };
     }
 
     // Terminal: Completed — no refund needed
     if (!requiresRefund(providerStatus)) {
-        await Order.findByIdAndUpdate(order._id, {
-            $set: {
-                status: ORDER_STATUS.COMPLETED,
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
-                lastCheckedAt: now,
-            },
+        const completedOrder = await transitionFromProcessing(order._id, {
+            status: ORDER_STATUS.COMPLETED,
+            providerStatus: providerStatus,
+            providerRawResponse: statusResult.rawResponse,
+            lastCheckedAt: now,
         });
+
+        if (!completedOrder) {
+            return { action: 'skipped' };
+        }
 
         createAuditLog({
             actorId: order.userId,
@@ -688,7 +758,7 @@ const processOrderStatusResult = async (order, statusResult) => {
         });
 
         // Notification: fire-and-forget
-        notifyOrderCompleted(order);
+        notifyOrderCompleted(completedOrder);
 
         return { action: 'completed' };
     }
@@ -703,15 +773,17 @@ const processOrderStatusResult = async (order, statusResult) => {
             || '0';
         const remains = parseInt(remainsStr, 10) || 0;
 
-        await Order.findByIdAndUpdate(order._id, {
-            $set: {
-                status: ORDER_STATUS.PARTIAL,
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
-                remains: remains,
-                lastCheckedAt: now,
-            },
+        const partialOrder = await transitionFromProcessing(order._id, {
+            status: ORDER_STATUS.PARTIAL,
+            providerStatus: providerStatus,
+            providerRawResponse: statusResult.rawResponse,
+            remains: remains,
+            lastCheckedAt: now,
         });
+
+        if (!partialOrder) {
+            return { action: 'skipped' };
+        }
 
         createAuditLog({
             actorId: order.userId,
@@ -731,8 +803,8 @@ const processOrderStatusResult = async (order, statusResult) => {
         // Trigger partial refund via processOrderRefund
         const { processOrderRefund } = require('./order.service');
         try {
-            await processOrderRefund(order._id, remains, {
-                actorId: order.userId,
+            await processOrderRefund(partialOrder._id, remains, {
+                actorId: partialOrder.userId,
                 actorRole: ACTOR_ROLES.SYSTEM,
             });
         } catch (e) {
@@ -744,15 +816,17 @@ const processOrderStatusResult = async (order, statusResult) => {
 
     if (mappedStatus === ORDER_STATUS.CANCELED) {
         // ── CANCELED: full refund ────────────────────────────────────────
-        await Order.findByIdAndUpdate(order._id, {
-            $set: {
-                status: ORDER_STATUS.CANCELED,
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
-                failedAt: now,
-                lastCheckedAt: now,
-            },
+        const canceledOrder = await transitionFromProcessing(order._id, {
+            status: ORDER_STATUS.CANCELED,
+            providerStatus: providerStatus,
+            providerRawResponse: statusResult.rawResponse,
+            failedAt: now,
+            lastCheckedAt: now,
         });
+
+        if (!canceledOrder) {
+            return { action: 'skipped' };
+        }
 
         createAuditLog({
             actorId: order.userId,
@@ -779,8 +853,8 @@ const processOrderStatusResult = async (order, statusResult) => {
         // Trigger full refund via processOrderRefund
         const { processOrderRefund } = require('./order.service');
         try {
-            await processOrderRefund(order._id, 0, {
-                actorId: order.userId,
+            await processOrderRefund(canceledOrder._id, 0, {
+                actorId: canceledOrder.userId,
                 actorRole: ACTOR_ROLES.SYSTEM,
             });
         } catch (e) {
@@ -791,15 +865,17 @@ const processOrderStatusResult = async (order, statusResult) => {
     }
 
     // ── FAILED (internal failures, rejected) — existing refund path ──────
-    await Order.findByIdAndUpdate(order._id, {
-        $set: {
-            status: ORDER_STATUS.FAILED,
-            providerStatus: providerStatus,
-            providerRawResponse: statusResult.rawResponse,
-            failedAt: now,
-            lastCheckedAt: now,
-        },
+    const failedOrder = await transitionFromProcessing(order._id, {
+        status: ORDER_STATUS.FAILED,
+        providerStatus: providerStatus,
+        providerRawResponse: statusResult.rawResponse,
+        failedAt: now,
+        lastCheckedAt: now,
     });
+
+    if (!failedOrder) {
+        return { action: 'skipped' };
+    }
 
     createAuditLog({
         actorId: order.userId,
@@ -823,8 +899,7 @@ const processOrderStatusResult = async (order, statusResult) => {
         metadata: { orderId: order._id.toString(), reason: 'PROVIDER_FAILED' },
     });
 
-    const freshOrder = await Order.findById(order._id);
-    await refundFailedOrder(freshOrder).catch((e) =>
+    await refundFailedOrder(failedOrder).catch((e) =>
         console.error(`[Fulfillment] Refund error (failed) for ${order._id}:`, e.message)
     );
 
@@ -846,25 +921,40 @@ const _escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * orders out of the normal fail/refund path until a reference lookup has
  * either recovered the remote ID or exhausted the manual-review policy.
  */
-const recoverUncertainPlacement = async (order, adapter) => {
+const recoverUncertainPlacement = async (order, adapter, unavailableRecovery = 'unsupported') => {
     const now = new Date();
     const defer = async (recovery) => {
         const retryCount = Number(order.retryCount || 0) + 1;
         const exhausted = retryCount >= MAX_RETRY_COUNT;
-        await Order.findByIdAndUpdate(order._id, {
-            $set: {
-                ...(exhausted ? { status: ORDER_STATUS.MANUAL_REVIEW } : {}),
+        const filter = {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+        };
+        const updated = exhausted
+            ? await transitionFromProcessing(order._id, {
+                status: ORDER_STATUS.MANUAL_REVIEW,
                 providerStatus: 'PLACEMENT_UNCERTAIN',
                 providerRawResponse: { placement: 'uncertain', recovery },
                 retryCount,
                 lastCheckedAt: now,
-            },
-        });
-        return { action: exhausted ? 'manual-review' : 'pending' };
+            }, filter)
+            : await Order.findOneAndUpdate(
+                { _id: order._id, status: ORDER_STATUS.PROCESSING, ...filter },
+                {
+                    $set: {
+                        providerStatus: 'PLACEMENT_UNCERTAIN',
+                        providerRawResponse: { placement: 'uncertain', recovery },
+                        retryCount,
+                        lastCheckedAt: now,
+                    },
+                },
+                { new: true }
+            );
+        return { action: updated ? (exhausted ? 'manual-review' : 'pending') : 'skipped' };
     };
 
-    if (typeof adapter.checkOrderByReference !== 'function') {
-        return defer('unsupported');
+    if (!adapter || typeof adapter.checkOrderByReference !== 'function') {
+        return defer(unavailableRecovery);
     }
 
     try {
@@ -873,14 +963,24 @@ const recoverUncertainPlacement = async (order, adapter) => {
             return defer('not_found');
         }
 
-        const recovered = await Order.findByIdAndUpdate(order._id, {
-            $set: {
-                providerOrderId: result.providerOrderId,
-                providerStatus: result.providerStatus,
-                providerRawResponse: result.rawResponse,
-                lastCheckedAt: now,
+        const recovered = await Order.findOneAndUpdate(
+            {
+                _id: order._id,
+                status: ORDER_STATUS.PROCESSING,
+                providerOrderId: null,
+                providerStatus: 'PLACEMENT_UNCERTAIN',
             },
-        }, { new: true });
+            {
+                $set: {
+                    providerOrderId: result.providerOrderId,
+                    providerStatus: result.providerStatus,
+                    providerRawResponse: result.rawResponse,
+                    lastCheckedAt: now,
+                },
+            },
+            { new: true }
+        );
+        if (!recovered) return { action: 'skipped' };
         return processOrderStatusResult(recovered, result);
     } catch (error) {
         return defer('lookup_failed');
@@ -890,7 +990,7 @@ const recoverUncertainPlacement = async (order, adapter) => {
 /**
  * pollProcessingOrders(providerOverride?)
  *
- * Called by the cron job every N minutes.
+ * Called by the active cron job every minute.
  *
  * Finds all PROCESSING automatic orders with a providerOrderId, then groups
  * them by order.providerCode — the immutable slug snapshotted at order-creation
@@ -902,8 +1002,8 @@ const recoverUncertainPlacement = async (order, adapter) => {
  *   2. Call adapter.checkOrders(ids) — one HTTP batch call per provider
  *   3. For each result:
  *       Completed / accept    → COMPLETED
- *       Cancelled / reject    → FAILED + refund  (via processOrderStatusResult)
- *       wait / Pending / 5xx  → leave PROCESSING, increment retryCount
+ *       Cancelled / reject    → CANCELED/FAILED + refund (after CAS transition)
+ *       wait / Pending        → leave PROCESSING, increment retryCount
  *
  * @param {Object|null} [providerOverride]  - single mock provider (tests only)
  * @returns {Promise<{ checked, completed, failed, pending, errors }>}
@@ -947,12 +1047,12 @@ const pollProcessingOrders = async (providerOverride = null) => {
 
         await Promise.all(exhausted.map(async (order) => {
             try {
-                await Order.findByIdAndUpdate(order._id, {
-                    $set: {
-                        status: ORDER_STATUS.MANUAL_REVIEW,
-                        lastCheckedAt: now,
-                    },
-                });
+                const moved = await transitionFromProcessing(order._id, {
+                    status: ORDER_STATUS.MANUAL_REVIEW,
+                    lastCheckedAt: now,
+                }, { retryCount: { $gte: MAX_RETRY_COUNT } });
+
+                if (!moved) return;
 
                 createAuditLog({
                     actorId:    order.userId,
@@ -1084,10 +1184,27 @@ const pollProcessingOrders = async (providerOverride = null) => {
             if (!providerDoc) {
                 console.warn(
                     `[FulfillmentCron] No active provider for code "${code}" —` +
-                    ` skipping ${orders.length} order(s). ` +
+                    ` deferring uncertain placement recovery for ${orders.length} order(s). ` +
                     `(Provider may have been deactivated or renamed.)`
                 );
-                orders.forEach(() => stats.pending++);
+                const uncertain = orders.filter((order) =>
+                    order.providerStatus === 'PLACEMENT_UNCERTAIN' && !order.providerOrderId
+                );
+                const normal = orders.filter((order) => order.providerOrderId != null);
+
+                for (const order of uncertain) {
+                    try {
+                        _recordAction((await recoverUncertainPlacement(
+                            order,
+                            null,
+                            'provider_resolution_unavailable'
+                        )).action);
+                    } catch (err) {
+                        stats.errors.push(`[${order._id}] ${err.message}`);
+                        stats.pending++;
+                    }
+                }
+                normal.forEach(() => stats.pending++);
                 continue;
             }
 

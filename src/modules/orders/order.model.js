@@ -19,11 +19,11 @@ const ORDER_EXECUTION_TYPES = Object.freeze({
 
 /**
  * Maximum number of automatic status-poll retries before the kill switch fires.
- * At a 5-minute cron cadence, 24 retries ≈ 2 hours of polling.
+ * At a 1-minute cron cadence, 120 retries ≈ 2 hours of polling.
  * Orders exceeding this are moved to MANUAL_REVIEW instead of being auto-failed,
  * preserving the wallet deduction until an admin inspects and resolves the order.
  */
-const MAX_RETRY_COUNT = 24;
+const MAX_RETRY_COUNT = 120;
 
 const orderSchema = new mongoose.Schema(
     {
@@ -363,7 +363,8 @@ const orderSchema = new mongoose.Schema(
 
         /**
          * Number of status-check attempts made by the cron job.
-         * When retryCount >= MAX_RETRY_COUNT the order is force-failed.
+         * When retryCount >= MAX_RETRY_COUNT the order is moved to
+         * MANUAL_REVIEW without an automatic refund.
          */
         retryCount: {
             type: Number,

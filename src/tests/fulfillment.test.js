@@ -167,6 +167,153 @@ describe('[2] executeOrder -- provider cases', () => {
         expect(updated.refunded).toBe(false);
     });
 
+    it('transient placement timeout -> PLACEMENT_UNCERTAIN without refund', async () => {
+        const order = await makeOrderDoc(customer._id);
+
+        const timeoutError = Object.assign(
+            new Error('provider timeout'),
+            { code: 'ETIMEDOUT' }
+        );
+
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockRejectedValue(timeoutError),
+        });
+
+        const { order: updated, refunded } = await executeOrder(order._id, provider);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBeNull();
+        expect(updated.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(updated.refunded).toBe(false);
+        expect(refunded).toBe(false);
+    });
+
+    it.each([
+        ['HTTP 500', Object.assign(new Error('provider 500'), { response: { status: 500 } })],
+        ['HTTP 502', Object.assign(new Error('provider 502'), { response: { status: 502 } })],
+        ['EAI_AGAIN', Object.assign(new Error('DNS retry'), { code: 'EAI_AGAIN' })],
+        ['generic socket failure', new Error('socket/network failure')],
+    ])('thrown placement error %s -> PLACEMENT_UNCERTAIN without refund', async (_label, error) => {
+        const order = await makeOrderDoc(customer._id);
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockRejectedValue(error),
+        });
+
+        const { order: updated, refunded } = await executeOrder(order._id, provider);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBeNull();
+        expect(updated.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(updated.refunded).toBe(false);
+        expect(refunded).toBe(false);
+        await expect(WalletTransaction.countDocuments({
+            userId: customer._id,
+            type: 'REFUND',
+            reference: order._id,
+        })).resolves.toBe(0);
+    });
+
+    it('concurrent executeOrder calls claim provider dispatch only once', async () => {
+        const order = await makeOrderDoc(customer._id);
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true,
+                providerOrderId: 'REMOTE-ONCE',
+                providerStatus: 'Pending',
+                rawResponse: {},
+                errorMessage: null,
+            }),
+        });
+
+        await Promise.all([
+            executeOrder(order._id, provider),
+            executeOrder(order._id, provider),
+        ]);
+
+        expect(provider.placeOrder).toHaveBeenCalledTimes(1);
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(fresh.providerOrderId).toBe('REMOTE-ONCE');
+    });
+
+    it.each([
+        ['success=false rejection', {
+            success: false,
+            providerOrderId: null,
+            providerStatus: 'Cancelled',
+            rawResponse: { error: 'late rejection' },
+            errorMessage: 'late rejection',
+        }],
+        ['success=true cancellation', {
+            success: true,
+            providerOrderId: null,
+            providerStatus: 'Cancelled',
+            rawResponse: { error: 'late cancellation' },
+            errorMessage: 'late cancellation',
+        }],
+    ])('recovered provider order cannot be overwritten/refunded by stale immediate normalized rejection (%s)', async (_label, staleResult) => {
+        const order = await makeOrderDoc(customer._id);
+        let placementStarted;
+        const placementHasStarted = new Promise((resolve) => { placementStarted = resolve; });
+        let releasePlacement;
+        const placementRelease = new Promise((resolve) => { releasePlacement = resolve; });
+        const provider = makeMockProvider({
+            placeOrder: jest.fn(async () => {
+                placementStarted();
+                await placementRelease;
+                return staleResult;
+            }),
+        });
+
+        const execution = executeOrder(order._id, provider);
+        await placementHasStarted;
+        await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                providerOrderId: 'REMOTE-FOUND',
+                providerStatus: 'Pending',
+                providerRawResponse: { recovered: true },
+            },
+        });
+        releasePlacement();
+        const result = await execution;
+
+        expect(result.refunded).toBe(false);
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(fresh.providerOrderId).toBe('REMOTE-FOUND');
+        expect(fresh.providerStatus).toBe('Pending');
+        expect(fresh.refunded).toBe(false);
+        expect(await WalletTransaction.countDocuments({
+            userId: customer._id,
+            type: 'REFUND',
+            reference: order._id,
+        })).toBe(0);
+    });
+
+    it('post-dispatch internal failure moves to MANUAL_REVIEW without refund', async () => {
+        const order = await makeOrderDoc(customer._id);
+        const circular = {};
+        circular.self = circular;
+        const provider = makeMockProvider({
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true,
+                providerOrderId: 'REMOTE-CIRCULAR',
+                providerStatus: 'Pending',
+                rawResponse: circular,
+                errorMessage: null,
+            }),
+        });
+
+        const result = await executeOrder(order._id, provider);
+
+        expect(provider.placeOrder).toHaveBeenCalledTimes(1);
+        expect(result.refunded).toBe(false);
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(fresh.refunded).toBe(false);
+        expect(fresh.providerRawResponse.fatalError).toBeTruthy();
+    });
+
     it('passes the persisted local orderNumber as the stable provider reference', async () => {
         const order = await makeOrderDoc(customer._id, { orderNumber: 'LOCAL-REFERENCE-1' });
         const provider = makeMockProvider({
@@ -428,8 +575,10 @@ describe('[4] processOrderStatusResult', () => {
         expect(fresh.retryCount).toBe(3);
     });
 
-    it(`Pending at retry limit (${MAX_RETRY_COUNT}) -> FAILED + refund`, async () => {
-        const order = await makeOrderDoc(customer._id, { retryCount: MAX_RETRY_COUNT - 1 });
+    it(`Pending at retry limit (${MAX_RETRY_COUNT}) -> MANUAL_REVIEW without refund`, async () => {
+        const order = await makeOrderDoc(customer._id, {
+            retryCount: MAX_RETRY_COUNT - 1,
+        });
 
         const result = await processOrderStatusResult(order, {
             providerOrderId: 100,
@@ -437,10 +586,21 @@ describe('[4] processOrderStatusResult', () => {
             rawResponse: { status: 'Pending' },
         });
 
-        expect(result.action).toBe('failed');
+        expect(result.action).toBe('manual-review');
+
         const fresh = await Order.findById(order._id);
-        expect(fresh.status).toBe(ORDER_STATUS.FAILED);
-        expect(fresh.refunded).toBe(true);
+
+        expect(fresh.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(fresh.retryCount).toBe(MAX_RETRY_COUNT);
+        expect(fresh.refunded).toBe(false);
+
+        const refundTxns = await WalletTransaction.find({
+            userId: customer._id,
+            type: 'REFUND',
+            reference: order._id,
+        });
+
+        expect(refundTxns).toHaveLength(0);
     });
 
     it('skips order that is not PROCESSING', async () => {
@@ -453,6 +613,72 @@ describe('[4] processOrderStatusResult', () => {
         });
 
         expect(result.action).toBe('skipped');
+    });
+
+    it('stale Cancelled cannot overwrite Completed or issue a refund', async () => {
+        const order = await makeOrderDoc(customer._id);
+
+        const completed = await processOrderStatusResult(order, {
+            providerOrderId: 100,
+            providerStatus: 'Completed',
+            rawResponse: { status: 'Completed' },
+        });
+        const staleCancelled = await processOrderStatusResult(order, {
+            providerOrderId: 100,
+            providerStatus: 'Cancelled',
+            rawResponse: { status: 'Cancelled' },
+        });
+
+        expect(completed.action).toBe('completed');
+        expect(staleCancelled.action).toBe('skipped');
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(fresh.refunded).toBe(false);
+        expect(await WalletTransaction.countDocuments({
+            userId: customer._id, type: 'REFUND', reference: order._id,
+        })).toBe(0);
+    });
+
+    it('stale Failed cannot overwrite Completed or issue a refund', async () => {
+        const order = await makeOrderDoc(customer._id);
+
+        await processOrderStatusResult(order, {
+            providerOrderId: 100,
+            providerStatus: 'Completed',
+            rawResponse: { status: 'Completed' },
+        });
+        const staleFailed = await processOrderStatusResult(order, {
+            providerOrderId: 100,
+            providerStatus: 'Failed',
+            rawResponse: { status: 'Failed' },
+        });
+
+        expect(staleFailed.action).toBe('skipped');
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(fresh.refunded).toBe(false);
+    });
+
+    it('stale retry-limit result cannot move Completed to MANUAL_REVIEW', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            retryCount: MAX_RETRY_COUNT - 1,
+        });
+
+        await processOrderStatusResult(order, {
+            providerOrderId: 100,
+            providerStatus: 'Completed',
+            rawResponse: { status: 'Completed' },
+        });
+        const stalePending = await processOrderStatusResult(order, {
+            providerOrderId: 100,
+            providerStatus: 'Pending',
+            rawResponse: { status: 'Pending' },
+        });
+
+        expect(stalePending.action).toBe('skipped');
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(fresh.refunded).toBe(false);
     });
 });
 
@@ -585,6 +811,165 @@ describe('[5] pollProcessingOrders -- cron batch', () => {
         const fresh = await Order.findById(order._id);
         expect(fresh.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
         expect(fresh.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(fresh.refunded).toBe(false);
+    });
+
+    it('unresolvable provider advances uncertain-placement recovery without refund', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerCode: 'missing-provider-retry',
+            retryCount: 0,
+        });
+
+        await pollProcessingOrders();
+
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(fresh.retryCount).toBe(1);
+        expect(fresh.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(fresh.providerRawResponse).toMatchObject({
+            placement: 'uncertain',
+            recovery: 'provider_resolution_unavailable',
+        });
+        expect(fresh.refunded).toBe(false);
+        expect(await WalletTransaction.countDocuments({
+            userId: customer._id,
+            type: 'REFUND',
+            reference: order._id,
+        })).toBe(0);
+    });
+
+    it('unresolvable provider moves exhausted uncertain placement to MANUAL_REVIEW without refund', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerCode: 'missing-provider-limit',
+            retryCount: MAX_RETRY_COUNT - 1,
+        });
+
+        await pollProcessingOrders();
+
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(fresh.retryCount).toBe(MAX_RETRY_COUNT);
+        expect(fresh.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(fresh.refunded).toBe(false);
+        expect(await WalletTransaction.countDocuments({
+            userId: customer._id,
+            type: 'REFUND',
+            reference: order._id,
+        })).toBe(0);
+    });
+
+    it('stale terminal order cannot be moved to MANUAL_REVIEW during unavailable-provider recovery', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerCode: 'missing-provider-race',
+            retryCount: MAX_RETRY_COUNT - 1,
+        });
+        const originalFindOneAndUpdate = Order.findOneAndUpdate.bind(Order);
+        let manualReviewUpdateStarted;
+        const manualReviewUpdateHasStarted = new Promise((resolve) => { manualReviewUpdateStarted = resolve; });
+        let releaseManualReviewUpdate;
+        const manualReviewUpdateRelease = new Promise((resolve) => { releaseManualReviewUpdate = resolve; });
+        const spy = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation((filter, update, options) => {
+            if (update?.$set?.status === ORDER_STATUS.MANUAL_REVIEW) {
+                manualReviewUpdateStarted();
+                return manualReviewUpdateRelease.then(() => originalFindOneAndUpdate(filter, update, options));
+            }
+            return originalFindOneAndUpdate(filter, update, options);
+        });
+
+        try {
+            const polling = pollProcessingOrders();
+            await manualReviewUpdateHasStarted;
+            await Order.findByIdAndUpdate(order._id, {
+                $set: { status: ORDER_STATUS.COMPLETED, providerStatus: 'Completed' },
+            });
+            releaseManualReviewUpdate();
+            await polling;
+        } finally {
+            spy.mockRestore();
+        }
+
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(fresh.refunded).toBe(false);
+    });
+
+    it('stale uncertain-placement recovery cannot overwrite a completed order', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            orderNumber: 'LOCAL-RECOVER-RACE',
+        });
+        let lookupStarted;
+        const lookupHasStarted = new Promise((resolve) => { lookupStarted = resolve; });
+        let releaseLookup;
+        const lookupRelease = new Promise((resolve) => { releaseLookup = resolve; });
+        const provider = makeMockProvider({
+            checkOrderByReference: jest.fn(async () => {
+                lookupStarted();
+                await lookupRelease;
+                return {
+                    found: true,
+                    providerOrderId: 'REMOTE-RACE',
+                    providerStatus: 'Pending',
+                    rawResponse: { status: 'Pending' },
+                };
+            }),
+        });
+
+        const polling = pollProcessingOrders(provider);
+        await lookupHasStarted;
+        const current = await Order.findById(order._id);
+        await processOrderStatusResult(current, {
+            providerOrderId: 'REMOTE-RACE',
+            providerStatus: 'Completed',
+            rawResponse: { status: 'Completed' },
+        });
+        releaseLookup();
+        await polling;
+
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(fresh.refunded).toBe(false);
+    });
+
+    it('stale exhausted cron snapshot cannot move Completed to MANUAL_REVIEW', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            providerOrderId: 'REMOTE-EXHAUSTED-RACE',
+            retryCount: MAX_RETRY_COUNT,
+        });
+        const originalFindOneAndUpdate = Order.findOneAndUpdate.bind(Order);
+        let manualReviewUpdateStarted;
+        const manualReviewUpdateHasStarted = new Promise((resolve) => { manualReviewUpdateStarted = resolve; });
+        let releaseManualReviewUpdate;
+        const manualReviewUpdateRelease = new Promise((resolve) => { releaseManualReviewUpdate = resolve; });
+        const spy = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation((filter, update, options) => {
+            if (update?.$set?.status === ORDER_STATUS.MANUAL_REVIEW) {
+                manualReviewUpdateStarted();
+                return manualReviewUpdateRelease.then(() => originalFindOneAndUpdate(filter, update, options));
+            }
+            return originalFindOneAndUpdate(filter, update, options);
+        });
+
+        try {
+            const polling = pollProcessingOrders(makeMockProvider());
+            await manualReviewUpdateHasStarted;
+            await Order.findByIdAndUpdate(order._id, {
+                $set: { status: ORDER_STATUS.COMPLETED },
+            });
+            releaseManualReviewUpdate();
+            await polling;
+        } finally {
+            spy.mockRestore();
+        }
+
+        const fresh = await Order.findById(order._id);
+        expect(fresh.status).toBe(ORDER_STATUS.COMPLETED);
         expect(fresh.refunded).toBe(false);
     });
 });

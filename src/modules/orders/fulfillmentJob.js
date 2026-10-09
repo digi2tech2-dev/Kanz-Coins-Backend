@@ -3,7 +3,7 @@
 /**
  * fulfillmentJob.js
  *
- * Background cron job that polls PROCESSING orders every 5 minutes.
+ * Background cron job that polls PROCESSING orders every minute.
  *
  * Lifecycle:
  *   start()   — schedule the job (called once from server.js after DB connects)
@@ -77,10 +77,10 @@ const runOnce = async (providerOverride = null) => {
  * Start the cron scheduler.
  * Call once from server.js after the DB connection is established.
  *
- * @param {string} [schedule='*\/5 * * * *']  - cron expression (default: every 5 min)
+ * @param {string} [schedule='* * * * *']  - cron expression (default: every minute)
  * @param {Object} [providerOverride]          - inject single provider (tests only)
  */
-const start = (schedule = '*/5 * * * *', providerOverride = null) => {
+const start = (schedule = '* * * * *', providerOverride = null) => {
     if (process.env.NODE_ENV === 'test') {
         console.log('[FulfillmentJob] Skipped in test environment.');
         return;
