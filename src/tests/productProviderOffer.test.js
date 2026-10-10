@@ -15,6 +15,7 @@ const { Currency } = require('../modules/currency/currency.model');
 const { Order } = require('../modules/orders/order.model');
 const { ProductProviderOffer } = require('../modules/products/productProviderOffer.model');
 const { getComparableProviderCost, selectProviderOfferForOrder } = require('../modules/products/providerOfferRouting.service');
+const { createOffer, updateOffer } = require('../modules/products/productProviderOffer.service');
 const { backfillLegacyProductProviderOffers } = require('../modules/products/productProviderOfferBackfill.service');
 const { updateProduct } = require('../modules/products/product.service');
 const { createOrder } = require('../modules/orders/order.service');
@@ -142,6 +143,36 @@ describe('ProductProviderOffer model', () => {
             allowAutomaticRouting: true,
         })).rejects.toThrow(/supplierCurrency.*required|maxPriceAgeMs.*required|priceSemantics/i);
     });
+
+    it('rejects FIXED_OFFER for an explicitly amount-priced ProviderProduct in both service and model validation', async () => {
+        const product = await createProduct();
+        const provider = await makeProvider('amount-validation');
+        const pp = await makeProviderProduct(provider, { rawPayload: { product_type: 'amount' } });
+        const invalidOffer = {
+            product: product._id,
+            provider: provider._id,
+            providerProduct: pp._id,
+            ...automaticMetadata({ priceSemantics: 'FIXED_OFFER' }),
+        };
+
+        await expect(createOffer(invalidOffer)).rejects.toMatchObject({
+            code: 'INVALID_PRICE_SEMANTICS_FOR_PROVIDER_PRODUCT',
+        });
+        await expect(ProductProviderOffer.create(invalidOffer))
+            .rejects.toThrow(/INVALID_PRICE_SEMANTICS_FOR_PROVIDER_PRODUCT/);
+    });
+
+    it('rejects an update that leaves FIXED_OFFER on a ProviderProduct newly identified as amount-priced', async () => {
+        const product = await createProduct();
+        const provider = await makeProvider('amount-update-validation');
+        const pp = await makeProviderProduct(provider, { rawPayload: { product_type: 'package' } });
+        const offer = await makeOffer(product, provider, pp, { priceSemantics: 'FIXED_OFFER' });
+
+        await ProviderProduct.updateOne({ _id: pp._id }, { $set: { rawPayload: { product_type: 'amount' } } });
+        await expect(updateOffer(offer._id, { notes: 'attempted unrelated edit' })).rejects.toMatchObject({
+            code: 'INVALID_PRICE_SEMANTICS_FOR_PROVIDER_PRODUCT',
+        });
+    });
 });
 
 describe('comparable provider costs', () => {
@@ -156,6 +187,44 @@ describe('comparable provider costs', () => {
         const perUnitCost = await getComparableProviderCost({ offer: perUnit, provider, providerProduct: await ProviderProduct.findById(perUnit.providerProduct), platformQuantity: 3 });
         expect(fixedCost).toMatchObject({ eligible: true, supplierCost: '2.5', normalizedCost: '2.5' });
         expect(perUnitCost).toMatchObject({ eligible: true, supplierCost: '7.5', normalizedCost: '7.5' });
+    });
+
+    it('treats explicit amount products as PER_UNIT and returns total supplier cost at small and large quantities', async () => {
+        const product = await createProduct();
+        const provider = await makeProvider('amount-total-cost');
+        const pp = await makeProviderProduct(provider, {
+            rawPrice: '0.0001',
+            minQty: 10000,
+            maxQty: 10000000,
+            rawPayload: { product_type: 'amount' },
+        });
+        const offer = await makeOffer(product, provider, pp, { priceSemantics: 'PER_UNIT' });
+
+        const tenThousand = await getComparableProviderCost({
+            offer, provider, providerProduct: pp, platformQuantity: 10000,
+        });
+        const largeOrder = await getComparableProviderCost({
+            offer, provider, providerProduct: pp, platformQuantity: 230000,
+        });
+
+        expect(tenThousand).toMatchObject({ eligible: true, supplierCost: '1', normalizedCost: '1' });
+        expect(largeOrder).toMatchObject({ eligible: true, supplierCost: '23', normalizedCost: '23' });
+    });
+
+    it('keeps genuine fixed-price products valid with FIXED_OFFER', async () => {
+        const product = await createProduct();
+        const provider = await makeProvider('genuine-fixed');
+        const pp = await makeProviderProduct(provider, {
+            rawPrice: '2.5',
+            minQty: 1,
+            maxQty: 10000000,
+            rawPayload: { product_type: 'package' },
+        });
+        const offer = await makeOffer(product, provider, pp, { priceSemantics: 'FIXED_OFFER' });
+
+        await expect(getComparableProviderCost({
+            offer, provider, providerProduct: pp, platformQuantity: 230000,
+        })).resolves.toMatchObject({ eligible: true, supplierCost: '2.5', normalizedCost: '2.5' });
     });
 
     it('routes USD at rate 1 and rejects every non-USD supplier currency', async () => {
@@ -209,6 +278,83 @@ describe('comparable provider costs', () => {
 });
 
 describe('offer selection and order snapshots', () => {
+    it('fails closed for a legacy amount ProductProviderOffer marked FIXED_OFFER before any provider placement', async () => {
+        let placementCalls = 0;
+        class NoPlacementAdapter extends BaseProviderAdapter {
+            async placeOrder() {
+                placementCalls += 1;
+                return { success: true, providerOrderId: 'should-not-happen', providerStatus: 'Pending', rawResponse: {} };
+            }
+        }
+        registerAdapter('price-semantics-mismatch', NoPlacementAdapter);
+
+        const { customer } = await createCustomerWithGroup();
+        const product = await createProduct({
+            executionType: 'automatic',
+            providerRoutingMode: 'MULTI_PROVIDER',
+            basePrice: '0.0001005',
+            minQty: 10000,
+            maxQty: 10000000,
+        });
+        const provider = await makeProvider('amount-mismatch', { adapterType: 'price-semantics-mismatch' });
+        const pp = await makeProviderProduct(provider, {
+            rawPrice: '0.0001',
+            minQty: 10000,
+            maxQty: 10000000,
+            rawPayload: { product_type: 'amount' },
+        });
+
+        // Simulate the legacy record that predates the new model/service validation.
+        await ProductProviderOffer.collection.insertOne({
+            product: product._id,
+            provider: provider._id,
+            providerProduct: pp._id,
+            enabled: true,
+            allowAutomaticRouting: true,
+            priceSemantics: 'FIXED_OFFER',
+            supplierCurrency: 'USD',
+            maxPriceAgeMs: 60 * 60 * 1000,
+            providerMapping: {},
+            priority: 0,
+        });
+
+        const selection = await selectProviderOfferForOrder({ product, quantity: 230000 });
+        expect(selection.selected).toBeNull();
+        expect(selection.candidates).toHaveLength(1);
+        expect(selection.candidates[0].cost.reason).toBe('PRICE_SEMANTICS_MISMATCH');
+
+        await expect(createOrder({ userId: customer._id, productId: product._id, quantity: 230000 }))
+            .rejects.toMatchObject({ code: 'NO_ELIGIBLE_PROVIDER_OFFER' });
+        expect(placementCalls).toBe(0);
+        await expect(Order.countDocuments({ userId: customer._id })).resolves.toBe(0);
+        await expect(countTransactions(customer._id)).resolves.toBe(0);
+    });
+
+    it('records routed profit from the total PER_UNIT supplier cost without multiplying it again', async () => {
+        const { customer } = await createCustomerWithGroup({}, { percentage: 0 });
+        const product = await createProduct({
+            executionType: 'automatic',
+            providerRoutingMode: 'MULTI_PROVIDER',
+            basePrice: '0.0001005',
+            minQty: 10000,
+            maxQty: 10000000,
+        });
+        const provider = await makeProvider('profit-total-cost');
+        const pp = await makeProviderProduct(provider, {
+            rawPrice: '0.0001',
+            minQty: 10000,
+            maxQty: 10000000,
+            rawPayload: { product_type: 'amount' },
+        });
+        await makeOffer(product, provider, pp, { priceSemantics: 'PER_UNIT' });
+
+        const { order } = await createOrder({ userId: customer._id, productId: product._id, quantity: 230000 });
+        expect(order.usdAmount).toBe('23.115');
+        expect(order.providerNormalizedCostSnapshot).toBe('23');
+        expect(order.profitUsd).toBe('0.115');
+        expect(Number(order.profitUsd)).not.toBeCloseTo(23.1149, 6);
+    });
+
     it('keeps LEGACY scalar routing when backfilled-style offers exist', async () => {
         const { customer } = await createCustomerWithGroup();
         const provider = await makeProvider('legacy-routing');

@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { hasPriceSemanticsMismatch } = require('./providerProductPriceSemantics');
 
 const PRICE_SEMANTICS = Object.freeze({
     FIXED_OFFER: 'FIXED_OFFER',
@@ -107,12 +108,17 @@ productProviderOfferSchema.pre('validate', async function validateRoutingMetadat
         if (this.provider && this.providerProduct) {
             const { ProviderProduct } = require('../providers/providerProduct.model');
             const providerProduct = await ProviderProduct.findById(this.providerProduct)
-                .select('provider')
+                .select('provider rawPayload')
                 .lean();
             if (!providerProduct) {
                 this.invalidate('providerProduct', 'providerProduct does not exist');
             } else if (String(providerProduct.provider) !== String(this.provider)) {
                 this.invalidate('providerProduct', 'providerProduct must belong to provider');
+            } else if (hasPriceSemanticsMismatch({ providerProduct, priceSemantics: this.priceSemantics })) {
+                this.invalidate(
+                    'priceSemantics',
+                    'INVALID_PRICE_SEMANTICS_FOR_PROVIDER_PRODUCT: amount provider products must use PER_UNIT price semantics'
+                );
             }
         }
 

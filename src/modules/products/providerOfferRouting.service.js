@@ -3,6 +3,7 @@
 const { ProductProviderOffer, PRICE_SEMANTICS } = require('./productProviderOffer.model');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { normalizeProviderDecimalPrice, isPositive, multiply, compare } = require('../../shared/utils/decimalPrecision');
+const { hasPriceSemanticsMismatch } = require('./providerProductPriceSemantics');
 
 const ROUTING_CURRENCY = 'USD';
 
@@ -57,6 +58,12 @@ const getComparableProviderCost = async ({
     if (!providerProduct) return rejected('PROVIDER_PRODUCT_NOT_FOUND', base);
     if (String(idOf(providerProduct.provider)) !== String(idOf(offer.provider))) {
         return rejected('PROVIDER_PRODUCT_PROVIDER_MISMATCH', base);
+    }
+    // Legacy/direct DB writes can bypass the admin service. Refuse to route an
+    // explicit amount/per-unit catalog product with a fixed-total cost rather
+    // than guessing or recording a financially incorrect supplier cost.
+    if (hasPriceSemanticsMismatch({ providerProduct, priceSemantics: offer.priceSemantics })) {
+        return rejected('PRICE_SEMANTICS_MISMATCH', base);
     }
     if (!providerProduct.isActive) return rejected('PROVIDER_PRODUCT_INACTIVE', base);
     if (!Number.isInteger(providerQuantity) || providerQuantity < 1) return rejected('INVALID_PROVIDER_QUANTITY', base);

@@ -6,6 +6,7 @@ const { Provider } = require('../providers/provider.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
 const { Order } = require('../orders/order.model');
 const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { hasPriceSemanticsMismatch } = require('./providerProductPriceSemantics');
 
 const POPULATE_SAFE_OFFER = [
     { path: 'provider', select: 'name slug isActive' },
@@ -17,7 +18,7 @@ const assertRelation = async ({ product, provider, providerProduct }) => {
     const [productDoc, providerDoc, providerProductDoc] = await Promise.all([
         Product.findById(product).select('_id'),
         Provider.findById(provider).select('_id'),
-        ProviderProduct.findById(providerProduct).select('_id provider'),
+        ProviderProduct.findById(providerProduct).select('_id provider rawPayload'),
     ]);
     if (!productDoc) throw new NotFoundError('Product');
     if (!providerDoc) throw new NotFoundError('Provider');
@@ -26,6 +27,16 @@ const assertRelation = async ({ product, provider, providerProduct }) => {
         throw new BusinessRuleError(
             'The selected ProviderProduct belongs to a different Provider.',
             'PROVIDER_PRODUCT_PROVIDER_MISMATCH'
+        );
+    }
+    return providerProductDoc;
+};
+
+const assertPriceSemantics = ({ providerProduct, priceSemantics }) => {
+    if (hasPriceSemanticsMismatch({ providerProduct, priceSemantics })) {
+        throw new BusinessRuleError(
+            'This amount-based ProviderProduct uses per-unit pricing and must use PER_UNIT price semantics.',
+            'INVALID_PRICE_SEMANTICS_FOR_PROVIDER_PRODUCT'
         );
     }
 };
@@ -39,7 +50,8 @@ const listOffersForProduct = async (productId) => {
 };
 
 const createOffer = async (payload) => {
-    await assertRelation(payload);
+    const providerProduct = await assertRelation(payload);
+    assertPriceSemantics({ providerProduct, priceSemantics: payload.priceSemantics });
     try {
         const offer = await ProductProviderOffer.create(payload);
         return offer.populate(POPULATE_SAFE_OFFER);
@@ -67,7 +79,11 @@ const updateOffer = async (offerId, updates) => {
 
     const provider = safe.provider ?? offer.provider;
     const providerProduct = safe.providerProduct ?? offer.providerProduct;
-    await assertRelation({ product: offer.product, provider, providerProduct });
+    const providerProductDoc = await assertRelation({ product: offer.product, provider, providerProduct });
+    assertPriceSemantics({
+        providerProduct: providerProductDoc,
+        priceSemantics: safe.priceSemantics ?? offer.priceSemantics,
+    });
 
     Object.assign(offer, safe);
     try {
